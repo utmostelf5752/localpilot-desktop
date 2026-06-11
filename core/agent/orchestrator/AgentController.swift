@@ -176,25 +176,26 @@ public final class AgentController {
 
     public func testModelRuntimeConnection() {
         let settings = settings
-        providerStatus = "Checking local runtime..."
+        providerStatus = settings.modelProviderMode == .internalInProcess
+            ? "Checking internal model..."
+            : "Checking local runtime..."
         Task {
-            let runtime = ProcessManagedModelRuntime()
-            let provider = ManagedLocalModelProvider(
-                configuration: settings.plannerConfiguration(),
-                runtimeConfiguration: settings.plannerRuntimeConfiguration(),
-                runtime: runtime
-            )
+            let provider = makePlannerProvider(settings: settings, runtime: ProcessManagedModelRuntime())
             do {
                 try await provider.healthCheck()
                 try? await provider.closeModel()
                 await MainActor.run {
-                    providerStatus = "Managed runtime connected"
-                    appendLog("Managed runtime connected")
+                    providerStatus = settings.modelProviderMode == .internalInProcess
+                        ? "Internal model ready"
+                        : "Managed runtime connected"
+                    appendLog(providerStatus)
                 }
             } catch {
                 await MainActor.run {
-                    providerStatus = "Managed runtime failed: \(error.localizedDescription)"
-                    appendLog("Managed runtime failed")
+                    providerStatus = settings.modelProviderMode == .internalInProcess
+                        ? "Internal model failed: \(error.localizedDescription)"
+                        : "Managed runtime failed: \(error.localizedDescription)"
+                    appendLog(providerStatus)
                 }
             }
         }
@@ -202,16 +203,8 @@ public final class AgentController {
 
     private func runAgentLoop(task: String) async {
         let runtime = ProcessManagedModelRuntime()
-        let plannerProvider = ManagedLocalModelProvider(
-            configuration: settings.plannerConfiguration(),
-            runtimeConfiguration: settings.plannerRuntimeConfiguration(),
-            runtime: runtime
-        )
-        let guardProvider = ManagedLocalModelProvider(
-            configuration: settings.guardConfiguration(),
-            runtimeConfiguration: settings.guardRuntimeConfiguration(),
-            runtime: runtime
-        )
+        let plannerProvider = makePlannerProvider(settings: settings, runtime: runtime)
+        let guardProvider = makeGuardProvider(settings: settings, runtime: runtime)
         if let manager = modelSessionCloser as? ModelSessionManager {
             manager.register(plannerProvider)
             manager.register(guardProvider)
@@ -223,10 +216,14 @@ public final class AgentController {
         state.lastObservationSummary = context.visibleText.components(separatedBy: "\n").last ?? ""
 
         do {
-            currentActionLabel = "Checking local runtime"
-            providerStatus = "Checking local runtime..."
+            currentActionLabel = settings.modelProviderMode == .internalInProcess
+                ? "Checking internal model"
+                : "Checking local runtime"
+            providerStatus = currentActionLabel + "..."
             try await plannerProvider.healthCheck()
-            providerStatus = "Managed runtime connected"
+            providerStatus = settings.modelProviderMode == .internalInProcess
+                ? "Internal model ready"
+                : "Managed runtime connected"
 
             for step in 1...20 {
                 guard !Task.isCancelled, runStatus == .running else { return }
@@ -372,6 +369,32 @@ public final class AgentController {
     private func closeModelsIfNeeded() {
         guard settings.unloadModelsAfterRun else { return }
         modelSessionCloser?.closeLoadedModels()
+    }
+
+    private func makePlannerProvider(settings: AppSettings, runtime: any ManagedModelRuntime) -> any LocalModelProvider {
+        switch settings.modelProviderMode {
+        case .internalInProcess:
+            InternalLocalModelProvider(role: .planner, configuration: settings.plannerConfiguration())
+        case .managedRuntime:
+            ManagedLocalModelProvider(
+                configuration: settings.plannerConfiguration(),
+                runtimeConfiguration: settings.plannerRuntimeConfiguration(),
+                runtime: runtime
+            )
+        }
+    }
+
+    private func makeGuardProvider(settings: AppSettings, runtime: any ManagedModelRuntime) -> any LocalModelProvider {
+        switch settings.modelProviderMode {
+        case .internalInProcess:
+            InternalLocalModelProvider(role: .guard, configuration: settings.guardConfiguration())
+        case .managedRuntime:
+            ManagedLocalModelProvider(
+                configuration: settings.guardConfiguration(),
+                runtimeConfiguration: settings.guardRuntimeConfiguration(),
+                runtime: runtime
+            )
+        }
     }
 }
 

@@ -119,10 +119,17 @@ approve or reject risky actions, and inspect a reliable log of what happened.
 
 Current progress
 ----------------
-- Native macOS SwiftUI/AppKit shell exists.
-- Guarded one-action loop scaffolding exists.
-- Local model provider plumbing exists.
-- Policy, guard, approval, pause, stop, and logging scaffolding exists.
-- Observe actions now capture current app/window metadata and a screenshot
+- [x] Native macOS SwiftUI/AppKit shell exists.
+- [x] Guarded one-action loop scaffolding exists.
+- [x] Internal in-process model provider is the default, so the app can run a
+  planner/guard loop without Ollama or a separately configured runtime.
+- [x] Managed local runtime plumbing still exists as an optional advanced mode.
+- [x] Policy, guard, approval, pause, stop, and logging scaffolding exists.
+- [x] Observe actions now capture current app/window metadata and a screenshot
   payload for planner context.
-- Non-observe OS control is still dry-run.
+- [ ] Non-observe OS control is still dry-run.
+- [x] Accessibility element summary capture is wired into planner context, with
+  a clear permission fallback when macOS Accessibility access is not granted.
+- [ ] Approved click/type/scroll/key execution is not implemented yet.
+- [ ] Full real task completion beyond the internal smoke loop is not complete
+  yet.

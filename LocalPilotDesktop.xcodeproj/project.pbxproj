@@ -19,6 +19,7 @@
 		850DA3D0B6FB178CF71CDED4 /* ChatPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAFFB9B1847C0095073AE2F2 /* ChatPanelView.swift */; };
 		9681610AAF98BBB7292A3132 /* ModelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = D82A757089387A2A538E2D0A /* ModelProvider.swift */; };
 		980CB6DF7EFB1047258E36BB /* AgentController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34CEDA15601AAF5209089992 /* AgentController.swift */; };
+		A0753BEEF89507387F8191D6 /* InternalModelProviderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2F63494E6421B6740E3346E /* InternalModelProviderTests.swift */; };
 		A2FC446D10A4AA8129109DA3 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A66B5C34638F519A972DB83A /* AppSettings.swift */; };
 		A82665FC4BABDAEC69703882 /* OverlayWindowManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EBE7669E52C6EA85DDEF7C7 /* OverlayWindowManager.swift */; };
 		B5CDAD468C7FEB3806EDEE99 /* MainWindowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA6361A397A88CFA728B0EF4 /* MainWindowView.swift */; };
@@ -69,6 +70,7 @@
 		D82A757089387A2A538E2D0A /* ModelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelProvider.swift; sourceTree = "<group>"; };
 		DA6361A397A88CFA728B0EF4 /* MainWindowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowView.swift; sourceTree = "<group>"; };
 		E88A862D71AE523309847A20 /* GuardModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuardModel.swift; sourceTree = "<group>"; };
+		F2F63494E6421B6740E3346E /* InternalModelProviderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InternalModelProviderTests.swift; sourceTree = "<group>"; };
 		F3EAAEF748954E35202AB972 /* Planner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Planner.swift; sourceTree = "<group>"; };
 		FA3440277CE65DCBFE7A1B5C /* Executor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Executor.swift; sourceTree = "<group>"; };
 		FAFFB9B1847C0095073AE2F2 /* ChatPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatPanelView.swift; sourceTree = "<group>"; };
@@ -117,6 +119,7 @@
 			isa = PBXGroup;
 			children = (
 				D5EB22C3FC91E8D5C26E89DE /* AgentStateMachineTests.swift */,
+				F2F63494E6421B6740E3346E /* InternalModelProviderTests.swift */,
 				15E859E2B35FE5BB79B45DB1 /* ManagedLocalModelProviderTests.swift */,
 				B21009A5BFD01C25BD848CE1 /* ModelCleanupTests.swift */,
 				07329DAABE0CED002375B244 /* PlannerGuardTests.swift */,
@@ -341,6 +344,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				7D1CE9A496E82A0EEE1F2145 /* AgentStateMachineTests.swift in Sources */,
+				A0753BEEF89507387F8191D6 /* InternalModelProviderTests.swift in Sources */,
 				B9AC089F373F5951B5D9A2B6 /* ManagedLocalModelProviderTests.swift in Sources */,
 				C92EEAAC41FE6EC2EC15B6EC /* ModelCleanupTests.swift in Sources */,
 				F71560BF9415D7E82C183FAF /* PlannerGuardTests.swift in Sources */,

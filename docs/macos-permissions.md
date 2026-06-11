@@ -19,7 +19,8 @@ May be needed for app-specific control or browser automation. Automation scopes 
 ## Current Implementation
 
 - Uses an AppKit borderless overlay window for visual haze, fake cursor, and controls.
-- Starts a configured local model runtime executable and talks to it over localhost for planner and guard models.
+- Runs the default internal planner/guard provider in-process without Ollama or a localhost runtime.
+- In optional managed-runtime mode, starts a configured local model runtime executable and talks to it over localhost for planner and guard models.
 - Stops the configured model runtime after connection tests, Stop, blocked runs, and completed runs when model unloading is enabled.
 - Does not use ScreenCaptureKit.
 - Does not use AXUIElement.

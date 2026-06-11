@@ -16,13 +16,20 @@ LocalPilot Desktop is a macOS-only native app. The first implementation is a Swi
   - Stop cancels the loop immediately, disables execution, clears queued fake work, and exits Agent Mode.
 - Local JSONL event logging at Application Support: `LocalPilot Desktop/logs.jsonl`.
 - Core module placeholders under `core/agent` for orchestrator, planner, guard, state, context, policy, executor, providers, and logging.
-- Managed local model runtime integration:
+- Internal model integration:
+  - default in-process planner and guard providers run without Ollama or a
+    separately configured runtime;
+  - the internal planner emits one structured action at a time for smoke-run
+    verification;
+  - the internal guard returns JSON allow/deny decisions through the same guard
+    adapter as future model backends.
+- Optional managed local model runtime integration:
   - runtime executable path, planner model file, guard model file, host, port, launch arguments, health path, and completion path are configurable in Settings;
   - LocalPilot starts the runtime process itself with `Process`;
   - planner and guard calls go through a narrow localhost JSON endpoint;
   - Stop, blocked, done, and connection-test cleanup terminate the managed runtime through `ModelSessionManager`.
 - Planner and guard adapters that request JSON-only model output and decode structured actions/guard decisions.
-- Settings persistence for runtime executable/model paths, planner model, guard model, runtime endpoint details, context window, temperature, timeout, scopes, guard enablement, and dry-run mode.
+- Settings persistence for provider mode, runtime executable/model paths, planner model, guard model, runtime endpoint details, context window, temperature, timeout, scopes, guard enablement, and dry-run mode.
 - Model cleanup through `ModelSessionManager`; registered providers cancel active requests and stop their managed runtime when Stop or task completion/blocked cleanup runs.
 
 ## Control Boundary

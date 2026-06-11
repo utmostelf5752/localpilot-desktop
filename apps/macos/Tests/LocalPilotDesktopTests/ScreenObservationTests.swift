@@ -25,7 +25,8 @@ struct ScreenObservationTests {
             activeWindow: "Downloads",
             screenshotWidth: 1200,
             screenshotHeight: 800,
-            screenshotPNGBase64: "abc123"
+            screenshotPNGBase64: "abc123",
+            accessibilitySummary: nil
         ))
         let executor = LocalPilotActionExecutor(screenObserver: observer, dryRun: true)
         let action = StructuredAction(
@@ -53,7 +54,8 @@ struct ScreenObservationTests {
             activeWindow: "LocalPilot issue tracker",
             screenshotWidth: 1440,
             screenshotHeight: 900,
-            screenshotPNGBase64: "def456"
+            screenshotPNGBase64: "def456",
+            accessibilitySummary: "AX: button Start, text field Ask LocalPilot"
         ))
         let builder = AgentContextBuilder(screenObserver: observer)
 
@@ -69,5 +71,7 @@ struct ScreenObservationTests {
         #expect(context.activeWindow == "LocalPilot issue tracker")
         #expect(context.visibleText.contains("Open the issue tracker"))
         #expect(context.visibleText.contains("screenshot captured"))
+        #expect(context.visibleText.contains("button Start"))
+        #expect(context.visibleText.contains("text field Ask LocalPilot"))
     }
 }

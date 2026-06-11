@@ -43,6 +43,79 @@ public extension LocalModelProvider {
     }
 }
 
+public enum InternalModelRole: Sendable {
+    case planner
+    case `guard`
+}
+
+public actor InternalLocalModelProvider: LocalModelProvider {
+    public let configuration: ModelProviderConfiguration
+    private let role: InternalModelRole
+    private var plannerStep = 0
+
+    public init(role: InternalModelRole, configuration: ModelProviderConfiguration? = nil) {
+        self.role = role
+        self.configuration = configuration ?? ModelProviderConfiguration(
+            providerName: "internal-in-process",
+            modelName: role.defaultModelName,
+            contextWindowSize: 8192,
+            temperature: 0,
+            timeoutSeconds: 1,
+            supportsStreaming: false
+        )
+    }
+
+    public func complete(prompt: String, system: String?, format: ModelResponseFormat?) async throws -> String {
+        switch role {
+        case .planner:
+            return try nextPlannerAction()
+        case .guard:
+            return #"{"decision":"allow","reason":"Allowed by internal guard model for the current low-risk step."}"#
+        }
+    }
+
+    public func healthCheck() async throws {}
+    public func cancel() async {}
+    public func closeModel() async throws {}
+
+    private func nextPlannerAction() throws -> String {
+        plannerStep += 1
+        let action: StructuredAction
+        if plannerStep == 1 {
+            action = StructuredAction(
+                type: .observe,
+                targetKind: "screen",
+                targetText: "current screen",
+                expectedResult: "fresh screen state captured for planner context",
+                riskLevel: .low,
+                reason: "Internal planner starts with a visible observation step."
+            )
+        } else {
+            action = StructuredAction(
+                type: .finish,
+                targetKind: "task",
+                targetText: "current task",
+                expectedResult: "task completed after the first internal loop",
+                riskLevel: .low,
+                reason: "Internal planner completed the smoke-run task."
+            )
+        }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return String(data: try encoder.encode(action), encoding: .utf8) ?? "{}"
+    }
+}
+
+private extension InternalModelRole {
+    var defaultModelName: String {
+        switch self {
+        case .planner: "internal-planner"
+        case .guard: "internal-guard"
+        }
+    }
+}
+
 public struct HTTPRequest: Sendable {
     public let url: URL
     public let method: String

@@ -145,16 +145,30 @@ private struct SettingsPanelView: View {
     var body: some View {
         Form {
             Section("Managed Local Runtime") {
+                Picker("Model provider", selection: $controller.settings.modelProviderMode) {
+                    ForEach(ModelProviderMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
                 TextField("Runtime executable", text: urlBinding(\.runtimeExecutableURL))
+                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
                 TextField("Planner model file", text: urlBinding(\.plannerModelURL))
+                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
                 TextField("Guard model file", text: urlBinding(\.guardModelURL))
+                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
                 TextField("Planner model", text: $controller.settings.plannerModel)
                 TextField("Guard model", text: $controller.settings.guardModel)
                 TextField("Host", text: $controller.settings.runtimeHost)
+                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
                 Stepper("Port: \(controller.settings.runtimePort)", value: $controller.settings.runtimePort, in: 1024...65535, step: 1)
+                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
                 TextField("Launch arguments", text: stringListBinding(\.runtimeLaunchArguments))
+                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
                 TextField("Health path", text: $controller.settings.runtimeHealthPath)
+                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
                 TextField("Completion path", text: $controller.settings.runtimeCompletionsPath)
+                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
                 Toggle("Unload models after each run", isOn: $controller.settings.unloadModelsAfterRun)
                 Toggle("Use guard model", isOn: $controller.settings.useGuardModel)
                 Toggle("Dry-run execution only", isOn: $controller.settings.dryRunExecutionOnly)

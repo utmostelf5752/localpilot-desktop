@@ -14,7 +14,9 @@ Implemented in this run:
 - Pause freezes the fake loop;
 - Continue accepts an optional instruction and resumes;
 - events are logged locally;
-- managed local model provider scaffolding is present, but real OS control remains dry-run.
+- internal in-process model provider mode is the default;
+- managed local model provider scaffolding is present as an optional advanced mode;
+- real OS control remains dry-run.
 
 ## Milestone 2: Scripted Executor
 
@@ -32,7 +34,8 @@ Add ScreenCaptureKit screenshots, active app/window detection, basic accessibili
 
 Implemented now:
 
-- configurable runtime executable path;
+- internal in-process planner/guard provider with no external runtime;
+- configurable runtime executable path for optional managed-runtime mode;
 - configurable planner and guard model file paths;
 - configurable localhost host, port, health path, completion path, launch arguments, and environment;
 - process launch through `ProcessManagedModelRuntime`;
@@ -43,7 +46,8 @@ Implemented now:
 
 Still later:
 
-- package a default LocalPilot model runner binary and starter model files;
+- replace the deterministic internal smoke model with a real embedded local model backend;
+- package a default LocalPilot model runner binary and starter model files for managed-runtime mode if still needed;
 - generic OpenAI-compatible endpoint;
 - invalid JSON retry once with schema correction prompt;
 - LM Studio, MLX, and llama.cpp direct integrations.

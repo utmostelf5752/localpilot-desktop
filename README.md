@@ -30,9 +30,10 @@ xcodebuild build -project LocalPilotDesktop.xcodeproj -scheme LocalPilotDesktop 
 ## Current Status
 
 The app has a native SwiftUI/AppKit shell, guarded action loop scaffolding,
-local-model provider plumbing, overlay controls, policy checks, approval flow,
-logging, and a first real observation path that captures current app/window
-metadata plus a screenshot payload for observe actions and planner context.
+internal in-process planner/guard mode, optional managed-runtime plumbing,
+overlay controls, policy checks, approval flow, logging, and a first real
+observation path that captures current app/window metadata plus a screenshot
+payload for observe actions and planner context.
 
 Non-observe OS control remains dry-run until the permissioned executor is
 implemented.

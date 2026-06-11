@@ -37,7 +37,7 @@ struct ChatPanelView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("LocalPilot Desktop")
                     .font(.title2.weight(.semibold))
-                Text("Managed local model loop with guarded dry-run execution")
+                Text("Internal local model loop with guarded dry-run execution")
                     .foregroundStyle(.secondary)
             }
             Spacer()
