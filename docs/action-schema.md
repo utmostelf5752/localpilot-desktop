@@ -60,7 +60,11 @@ Planner output must be exactly one action. Natural-language reasoning is not tru
 
 ## Implemented Now
 
-Swift structured types exist in `core/agent/policy/ActionSchema.swift`. Planner JSON decoding accepts model output without an internal UUID and generates one locally. Batch rejection, deterministic policy rules, managed local model request shaping, runtime stop behavior, and planner/guard parsing are covered by tests.
+Swift structured types exist in `core/agent/policy/ActionSchema.swift`. Planner
+JSON decoding accepts model output without an internal UUID and generates one
+locally. Batch rejection, deterministic policy rules, internal in-process task
+planning, managed local model request shaping, runtime stop behavior,
+planner/guard parsing, and guarded executor routing are covered by tests.
 
 Still later:
 

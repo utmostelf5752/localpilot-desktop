@@ -134,7 +134,12 @@ Current progress
 - [x] Approved click/type/scroll/key execution is implemented behind the
   existing dry-run toggle, with tests using an injected controller so test runs
   never move the real mouse or type into the real UI.
-- [ ] Extended desktop actions such as double-click, clipboard, URL opening,
-  terminal commands, and app switching are still not implemented.
-- [ ] Full real task completion beyond the internal smoke loop is not complete
-  yet.
+- [x] Extended desktop actions such as double-click, copy, approved paste, URL
+  opening, restricted terminal commands, and app switching are implemented
+  behind the same guarded dry-run boundary.
+- [x] Simple real task completion beyond the internal smoke loop works for
+  recognized in-process tasks such as open URL, switch app, press key, type,
+  scroll, click coordinates, double-click coordinates, and restricted terminal
+  commands.
+- [ ] A general embedded local ML backend that can reason over arbitrary screen
+  tasks is still not implemented.

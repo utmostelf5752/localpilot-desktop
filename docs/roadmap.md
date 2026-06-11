@@ -16,10 +16,11 @@ Implemented in this run:
 - events are logged locally;
 - internal in-process model provider mode is the default;
 - managed local model provider scaffolding is present as an optional advanced mode;
-- click, safe typing, scroll, and keypress execution are implemented behind the
-  dry-run toggle;
-- double-click, clipboard, URL opening, terminal, and app switching execution
-  remain unimplemented.
+- the internal planner can complete simple observe -> action -> finish tasks
+  without Ollama or another model server;
+- click, double-click, safe typing, approved paste, copy, scroll, keypress, URL
+  opening, restricted terminal command, and app-switch execution are implemented
+  behind the dry-run toggle.
 
 ## Milestone 2: Scripted Executor
 
@@ -49,7 +50,7 @@ Implemented now:
 
 Still later:
 
-- replace the deterministic internal smoke model with a real embedded local model backend;
+- replace the deterministic internal task planner with a real embedded local model backend;
 - package a default LocalPilot model runner binary and starter model files for managed-runtime mode if still needed;
 - generic OpenAI-compatible endpoint;
 - invalid JSON retry once with schema correction prompt;
@@ -65,7 +66,8 @@ Persist structured state, recent raw steps, compacted history, approvals, and lo
 
 ## Milestone 8: Terminal Support
 
-Add restricted workspace-only terminal actions after policy enforcement is strong. Deletion remains blocked. Medium-risk commands require approval.
+Implemented in the guarded executor as restricted command execution after policy
+classification. Deletion remains blocked. Medium-risk commands require approval.
 
 ## Milestone 9: Polish
 

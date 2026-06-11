@@ -1,5 +1,8 @@
 import CoreGraphics
 import Foundation
+#if canImport(AppKit)
+import AppKit
+#endif
 
 public protocol ActionExecutor: Sendable {
     func execute(_ action: StructuredAction) async -> String
@@ -9,9 +12,15 @@ public protocol ActionExecutor: Sendable {
 
 public protocol ComputerControlling: Sendable {
     func click(at point: CGPoint) async
+    func doubleClick(at point: CGPoint) async
     func typeText(_ text: String) async
     func scroll(deltaY: Int32) async
     func pressKey(named key: String) async
+    func copySelection() async
+    func pasteText(_ text: String) async
+    func openURL(_ urlString: String) async -> Bool
+    func runTerminalCommand(_ command: String) async -> String
+    func switchApp(named appName: String) async -> Bool
 }
 
 public actor QuartzComputerController: ComputerControlling {
@@ -21,6 +30,14 @@ public actor QuartzComputerController: ComputerControlling {
         postMouse(.mouseMoved, at: point)
         postMouse(.leftMouseDown, at: point)
         postMouse(.leftMouseUp, at: point)
+    }
+
+    public func doubleClick(at point: CGPoint) {
+        postMouse(.mouseMoved, at: point)
+        postMouse(.leftMouseDown, at: point, clickState: 1)
+        postMouse(.leftMouseUp, at: point, clickState: 1)
+        postMouse(.leftMouseDown, at: point, clickState: 2)
+        postMouse(.leftMouseUp, at: point, clickState: 2)
     }
 
     public func typeText(_ text: String) {
@@ -55,13 +72,103 @@ public actor QuartzComputerController: ComputerControlling {
 
     public func pressKey(named key: String) {
         guard let keyCode = Self.keyCode(for: key.lowercased()) else { return }
-        CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true)?.post(tap: .cghidEventTap)
-        CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false)?.post(tap: .cghidEventTap)
+        postKey(keyCode)
     }
 
-    private func postMouse(_ type: CGEventType, at point: CGPoint) {
-        CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?
-            .post(tap: .cghidEventTap)
+    public func copySelection() {
+        postCommandKey(8)
+    }
+
+    public func pasteText(_ text: String) {
+        #if canImport(AppKit)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        #endif
+        postCommandKey(9)
+    }
+
+    public func openURL(_ urlString: String) async -> Bool {
+        guard let url = URL(string: urlString), ["http", "https"].contains(url.scheme?.lowercased()) else {
+            return false
+        }
+        #if canImport(AppKit)
+        return await MainActor.run {
+            NSWorkspace.shared.open(url)
+        }
+        #else
+        return false
+        #endif
+    }
+
+    public func runTerminalCommand(_ command: String) async -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-lc", command]
+
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return "failed to start: \(error.localizedDescription)"
+        }
+
+        let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let errorOutput = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let combined = [output, errorOutput]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        let bounded = String(combined.prefix(1_000))
+        if process.terminationStatus == 0 {
+            return bounded.isEmpty ? "exit 0" : bounded
+        }
+        return "exit \(process.terminationStatus): \(bounded)"
+    }
+
+    public func switchApp(named appName: String) async -> Bool {
+        #if canImport(AppKit)
+        let normalized = appName.lowercased()
+        if let runningApp = await MainActor.run(body: {
+            NSWorkspace.shared.runningApplications.first { app in
+                app.localizedName?.lowercased() == normalized ||
+                    app.bundleIdentifier?.lowercased() == normalized
+            }
+        }) {
+            return await MainActor.run {
+                runningApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            }
+        }
+
+        let escaped = appName.replacingOccurrences(of: "\"", with: "\\\"")
+        let result = await runTerminalCommand("/usr/bin/open -a \"\(escaped)\"")
+        return !result.hasPrefix("exit ")
+        #else
+        return false
+        #endif
+    }
+
+    private func postMouse(_ type: CGEventType, at point: CGPoint, clickState: Int64 = 1) {
+        let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)
+        event?.setIntegerValueField(.mouseEventClickState, value: clickState)
+        event?.post(tap: .cghidEventTap)
+    }
+
+    private func postKey(_ keyCode: CGKeyCode, flags: CGEventFlags = []) {
+        let down = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true)
+        let up = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false)
+        down?.flags = flags
+        up?.flags = flags
+        down?.post(tap: .cghidEventTap)
+        up?.post(tap: .cghidEventTap)
+    }
+
+    private func postCommandKey(_ keyCode: CGKeyCode) {
+        postKey(keyCode, flags: .maskCommand)
     }
 
     private static func keyCode(for key: String) -> CGKeyCode? {
@@ -117,6 +224,11 @@ public actor LocalPilotActionExecutor: ActionExecutor {
             guard let point = action.point else { return "Click blocked: coordinates are missing." }
             await computerController.click(at: point)
             return "Clicked \(action.targetText) at \(Int(point.x)),\(Int(point.y))."
+        case .doubleClick:
+            guard !dryRun else { return dryRunResult(for: action) }
+            guard let point = action.point else { return "Double-click blocked: coordinates are missing." }
+            await computerController.doubleClick(at: point)
+            return "Double-clicked \(action.targetText) at \(Int(point.x)),\(Int(point.y))."
         case .typeTextSafe:
             guard !dryRun else { return dryRunResult(for: action) }
             guard let text = action.text, !text.isEmpty else { return "Typing blocked: text is missing." }
@@ -132,11 +244,37 @@ public actor LocalPilotActionExecutor: ActionExecutor {
             let key = (action.text ?? action.targetText).lowercased()
             await computerController.pressKey(named: key)
             return "Pressed \(key)."
-        case .doubleClick, .typeTextSensitive, .copy, .paste, .openURL, .runTerminalCommand, .switchApp:
-            if dryRun {
-                return dryRunResult(for: action)
+        case .copy:
+            guard !dryRun else { return dryRunResult(for: action) }
+            await computerController.copySelection()
+            return "Copied \(action.targetText)."
+        case .paste:
+            guard !dryRun else { return dryRunResult(for: action) }
+            guard let text = action.text, !text.isEmpty else { return "Paste blocked: text is missing." }
+            await computerController.pasteText(text)
+            return "Pasted approved text into \(action.targetText)."
+        case .openURL:
+            guard !dryRun else { return dryRunResult(for: action) }
+            let urlString = action.text ?? action.targetText
+            guard await computerController.openURL(urlString) else { return "Open URL blocked or failed: \(urlString)." }
+            return "Opened URL \(urlString)."
+        case .runTerminalCommand:
+            guard !dryRun else { return dryRunResult(for: action) }
+            guard let command = action.command, !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return "Terminal command blocked: command is missing."
             }
-            return "Executor has no implementation for \(action.type.rawValue) yet."
+            let output = await computerController.runTerminalCommand(command)
+            return "Terminal command completed: \(output)"
+        case .switchApp:
+            guard !dryRun else { return dryRunResult(for: action) }
+            let appName = action.text ?? action.targetText
+            guard !appName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return "Switch app blocked: app name is missing."
+            }
+            guard await computerController.switchApp(named: appName) else { return "Switch app failed: \(appName)." }
+            return "Switched to \(appName)."
+        case .typeTextSensitive:
+            return "Sensitive typing is blocked by policy and executor."
         }
     }
 

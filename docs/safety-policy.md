@@ -27,9 +27,11 @@ The app now also exposes a native approval review sheet for `ask_user` decisions
 - One structured action at a time.
 - Stop and Pause are independent from the model.
 - Model sessions are closed after Stop, blocked tasks, and completed tasks when `Unload models after each run` is enabled.
-- Mouse, keyboard, scroll, and keypress execution remain behind the app-owned
+- Mouse, double-click, keyboard, scroll, copy, approved paste, URL open,
+  terminal command, and app-switch execution remain behind the app-owned
   executor and the dry-run setting. The model can only request structured
-  actions; it never receives direct CGEvent access.
+  actions; it never receives direct CGEvent, clipboard, NSWorkspace, or shell
+  access.
 
 ## Terminal Policy
 

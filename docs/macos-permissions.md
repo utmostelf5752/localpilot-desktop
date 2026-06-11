@@ -1,6 +1,9 @@
 # macOS Permissions
 
-Milestone 1 does not require real screen capture or computer control permissions because the overlay, fake cursor, and fake task do not read or control the user’s computer.
+LocalPilot now has real observation and guarded control paths. Dry-run remains
+the default, so a normal first launch can inspect the loop without moving the
+mouse, typing, opening URLs, switching apps, touching the clipboard, or running
+commands.
 
 ## Future Permissions
 
@@ -22,9 +25,14 @@ May be needed for app-specific control or browser automation. Automation scopes 
 - Runs the default internal planner/guard provider in-process without Ollama or a localhost runtime.
 - In optional managed-runtime mode, starts a configured local model runtime executable and talks to it over localhost for planner and guard models.
 - Stops the configured model runtime after connection tests, Stop, blocked runs, and completed runs when model unloading is enabled.
-- Does not use ScreenCaptureKit.
-- Does not use AXUIElement.
-- Does not use CGEvent.
+- Captures a screenshot payload for observe actions.
+- Uses AXUIElement summaries when Accessibility permission is granted, and
+  reports a clear fallback when it is not granted.
+- Uses CGEvent for approved mouse, keyboard, scroll, copy, and paste actions
+  only when dry-run is disabled.
 - Does not read clipboard contents.
+- Can set approved paste text onto the clipboard before posting paste.
 - Does not access files except local JSONL logs in Application Support.
-- Does not perform real mouse, keyboard, terminal, clipboard, file, or browser control; executor output is dry-run.
+- Can open approved URLs, switch apps, and run restricted terminal commands
+  after deterministic policy, optional user approval, guard review, and the
+  executor dry-run gate.

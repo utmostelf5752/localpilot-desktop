@@ -35,5 +35,10 @@ overlay controls, policy checks, approval flow, logging, and a first real
 observation path that captures current app/window metadata plus a screenshot
 payload for observe actions and planner context.
 
-Click, safe typing, scroll, and keypress execution are implemented behind the
-dry-run toggle. Dry-run remains the default.
+Click, double-click, safe typing, approved paste, copy, scroll, keypress, URL
+opening, restricted terminal command, and app-switch execution are implemented
+behind the dry-run toggle. Dry-run remains the default.
+
+The default internal planner can complete simple three-step local tasks without
+Ollama or another localhost model server: observe, perform one recognized
+structured action, then finish.
