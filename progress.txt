@@ -1,0 +1,128 @@
+LocalPilot Desktop Progress
+
+Project goal
+------------
+Build a fully functional macOS system where local AI models can observe the
+screen, reason about the current computer state, and use the computer in a
+visible action loop to complete user tasks. The experience should feel similar
+to Computer Use in Codex or Claude Code, but run local-first with local model
+providers.
+
+The system must let the user stay in control at all times. Local models may
+propose actions, but they must not directly control the OS, shell, files,
+browser, clipboard, mouse, or keyboard. Every action must pass through a
+structured schema, deterministic policy checks, guard review, and an executor
+owned by the app.
+
+Target user flow
+----------------
+1. User opens LocalPilot Desktop.
+2. User enters a task in a normal chat interface.
+3. App captures the current screen, app, window, URL/domain when available, and
+   accessibility state.
+4. Planner model proposes exactly one structured action.
+5. App validates the action against the action schema.
+6. Policy engine decides allow, ask_user, or block.
+7. Guard model reviews the action and returns allow or deny.
+8. Executor performs the action only if allowed.
+9. App captures the result, updates state, and logs the step.
+10. Loop repeats until the task is done, paused, stopped, or blocked.
+
+Core requirements
+-----------------
+- macOS-only native desktop app for v1.
+- Local-first model support through Ollama, LM Studio, llama.cpp, MLX, or a
+  generic OpenAI-compatible local endpoint.
+- Chat-based task entry.
+- Agent Mode overlay with screen haze, fake AI cursor, current action label,
+  Pause button, and Stop button.
+- One-action-at-a-time planner loop.
+- Native approval prompts for risky actions.
+- Hard Stop that immediately disables execution, cancels queued work, cancels
+  model requests where possible, and prevents any further actions.
+- Pause that disables execution, lets the user intervene manually, then resumes
+  from fresh screen state and optional new instruction.
+- Persistent logs of model proposals, policy decisions, guard decisions,
+  executed actions, observations, pauses, stops, and approvals.
+
+Safety constraints
+------------------
+- The model may only propose structured actions.
+- No direct model access to OS APIs, shell commands, files, websites,
+  clipboard, mouse, keyboard, or hidden automation surfaces.
+- No multi-action batches in v1.
+- Stop must not depend on asking the model to stop.
+- User-visible controls must remain available while Agent Mode is active.
+- Risky actions must require explicit user approval.
+- The policy engine must be deterministic and non-negotiable.
+
+Implementation milestones
+-------------------------
+1. Repo foundation
+   - Confirm native macOS project builds.
+   - Keep architecture, action schema, permissions, safety policy, context, and
+     roadmap docs aligned.
+
+2. Main app shell
+   - Chat window.
+   - Sidebar for tasks, settings, permissions, and logs.
+   - Action cards and approval cards in the main timeline.
+
+3. Observation layer
+   - ScreenCaptureKit screenshot/state capture.
+   - Accessibility state capture through AX APIs.
+   - Active app/window and URL/domain detection where available.
+
+4. Overlay layer
+   - Transparent always-on-top AppKit window.
+   - Haze overlay.
+   - Fake AI cursor showing intended action location.
+   - Floating Pause and Stop controls.
+   - Overlay states: idle, running, paused, approval_required, stopping,
+     stopped.
+
+5. Model provider layer
+   - Pluggable local model providers.
+   - Planner model request/response path.
+   - Guard model request/response path.
+   - Cancellation support for active model requests where possible.
+
+6. Action system
+   - Strict action schema validation.
+   - Deterministic policy engine.
+   - Guard review.
+   - Executor for approved mouse, keyboard, wait, scroll, and observe actions.
+   - Result capture after every action.
+
+7. Control loop
+   - One structured action per planner turn.
+   - Full observe -> plan -> validate -> policy -> guard -> execute -> observe
+     loop.
+   - Done, paused, stopped, and blocked terminal states.
+
+8. Interrupt handling
+   - Hard Stop behavior.
+   - Pause at safe action boundaries.
+   - Continue with fresh observation and optional user instruction.
+
+9. Verification
+   - Unit tests for schema validation, policy decisions, guard parsing, and
+     state transitions.
+   - Integration tests for loop behavior with mocked model providers.
+   - Manual smoke tests for overlay controls and macOS permission flows.
+
+Current definition of done
+--------------------------
+LocalPilot Desktop is considered functional when a user can give a task, watch
+the local model act through the visible guarded loop, interrupt it at any time,
+approve or reject risky actions, and inspect a reliable log of what happened.
+
+Current progress
+----------------
+- Native macOS SwiftUI/AppKit shell exists.
+- Guarded one-action loop scaffolding exists.
+- Local model provider plumbing exists.
+- Policy, guard, approval, pause, stop, and logging scaffolding exists.
+- Observe actions now capture current app/window metadata and a screenshot
+  payload for planner context.
+- Non-observe OS control is still dry-run.
