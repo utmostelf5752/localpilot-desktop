@@ -16,7 +16,10 @@ Implemented in this run:
 - events are logged locally;
 - internal in-process model provider mode is the default;
 - managed local model provider scaffolding is present as an optional advanced mode;
-- real OS control remains dry-run.
+- click, safe typing, scroll, and keypress execution are implemented behind the
+  dry-run toggle;
+- double-click, clipboard, URL opening, terminal, and app switching execution
+  remain unimplemented.
 
 ## Milestone 2: Scripted Executor
 

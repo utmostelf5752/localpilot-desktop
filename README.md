@@ -35,5 +35,5 @@ overlay controls, policy checks, approval flow, logging, and a first real
 observation path that captures current app/window metadata plus a screenshot
 payload for observe actions and planner context.
 
-Non-observe OS control remains dry-run until the permissioned executor is
-implemented.
+Click, safe typing, scroll, and keypress execution are implemented behind the
+dry-run toggle. Dry-run remains the default.

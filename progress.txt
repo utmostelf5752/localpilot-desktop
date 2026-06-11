@@ -127,9 +127,14 @@ Current progress
 - [x] Policy, guard, approval, pause, stop, and logging scaffolding exists.
 - [x] Observe actions now capture current app/window metadata and a screenshot
   payload for planner context.
-- [ ] Non-observe OS control is still dry-run.
+- [x] Non-observe OS control has moved past observe-only dry-run for approved
+  click, type, scroll, and key actions.
 - [x] Accessibility element summary capture is wired into planner context, with
   a clear permission fallback when macOS Accessibility access is not granted.
-- [ ] Approved click/type/scroll/key execution is not implemented yet.
+- [x] Approved click/type/scroll/key execution is implemented behind the
+  existing dry-run toggle, with tests using an injected controller so test runs
+  never move the real mouse or type into the real UI.
+- [ ] Extended desktop actions such as double-click, clipboard, URL opening,
+  terminal commands, and app switching are still not implemented.
 - [ ] Full real task completion beyond the internal smoke loop is not complete
   yet.

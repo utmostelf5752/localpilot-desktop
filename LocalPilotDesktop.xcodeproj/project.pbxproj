@@ -10,6 +10,7 @@
 		0E0466BC0D0C53CE367DE7C9 /* ContextCompactor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11A94D71DB50CC876E8E83BF /* ContextCompactor.swift */; };
 		194508F8008D9BCD2A91C0EB /* LocalEventLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17BB153655EF00F62EB04862 /* LocalEventLogger.swift */; };
 		2EBE399EC7784B4FD6DD704C /* LocalPilotDesktopApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABAED91C0557C99188F0855F /* LocalPilotDesktopApp.swift */; };
+		2FFDE97127CC21571B74A403 /* ActionExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E751C98D00B727EE8E65F1E /* ActionExecutorTests.swift */; };
 		30E4A44A3F2633A49AE226E3 /* ScreenObservationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 885052E49C708A2A79AFECBE /* ScreenObservationTests.swift */; };
 		47593BAFDC9E192DE2E8CA28 /* PolicyEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD252EDAA4606431C2F8C5D1 /* PolicyEngineTests.swift */; };
 		5DDE002197F8016583C70086 /* ScreenObservation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D329762F7A7503E00FF9D2F3 /* ScreenObservation.swift */; };
@@ -54,6 +55,7 @@
 		15E859E2B35FE5BB79B45DB1 /* ManagedLocalModelProviderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagedLocalModelProviderTests.swift; sourceTree = "<group>"; };
 		17BB153655EF00F62EB04862 /* LocalEventLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalEventLogger.swift; sourceTree = "<group>"; };
 		2985F315A2A599C6EA217718 /* LocalPilotDesktop.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LocalPilotDesktop.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		2E751C98D00B727EE8E65F1E /* ActionExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionExecutorTests.swift; sourceTree = "<group>"; };
 		34CEDA15601AAF5209089992 /* AgentController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentController.swift; sourceTree = "<group>"; };
 		43C4A9FEBD31B2EDD01C314B /* DeterministicPolicyEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeterministicPolicyEngine.swift; sourceTree = "<group>"; };
 		4D76C6F2D0261B92E98B522A /* LocalPilotDesktopTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LocalPilotDesktopTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -118,6 +120,7 @@
 		4A527F88BA0B4B398DDC5635 /* LocalPilotDesktopTests */ = {
 			isa = PBXGroup;
 			children = (
+				2E751C98D00B727EE8E65F1E /* ActionExecutorTests.swift */,
 				D5EB22C3FC91E8D5C26E89DE /* AgentStateMachineTests.swift */,
 				F2F63494E6421B6740E3346E /* InternalModelProviderTests.swift */,
 				15E859E2B35FE5BB79B45DB1 /* ManagedLocalModelProviderTests.swift */,
@@ -343,6 +346,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2FFDE97127CC21571B74A403 /* ActionExecutorTests.swift in Sources */,
 				7D1CE9A496E82A0EEE1F2145 /* AgentStateMachineTests.swift in Sources */,
 				A0753BEEF89507387F8191D6 /* InternalModelProviderTests.swift in Sources */,
 				B9AC089F373F5951B5D9A2B6 /* ManagedLocalModelProviderTests.swift in Sources */,
