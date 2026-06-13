@@ -46,4 +46,31 @@ Required files for later milestones:
 
 ## Implemented Now
 
-`ContextCompactor` currently exposes the 80 percent threshold calculation and configuration. Persistence, summarization, token estimation, and raw-history splitting are stubbed for Milestone 7.
+`ContextCompactor` exposes the 80 percent threshold calculation, a cheap token
+estimate (`estimateTokens`, ~4 chars/token), and rolling compaction
+(`compact(recentSteps:maxKeep:existingSummary:)`) that collapses older steps into
+a single short summary line while keeping the newest steps raw.
+
+`AgentHistory` is the bounded, in-memory source of truth the planner sees instead
+of the full chat log: a rolling `compactedSummary` plus a capped `recentSteps`
+tail (default 4). It never stores image/base64 payloads and truncates oversized
+step strings.
+
+`AgentContextBuilder.makeContext(settings:task:history:)` builds a lean,
+fresh context from the task line, the rolling summary, the recent-step tail, and
+**only the latest observation**. Screenshots are latest-only and never
+accumulate across steps. The legacy `makeContext(settings:messages:)` overload is
+kept for the message-oriented call sites but now caps to the trailing messages.
+
+The default context budget is large (`AppSettings.maximumContextWindowSize`,
+131072) so capable local models can use their full window, while compaction keeps
+the actual payload small enough for small-window models.
+
+Guard review is now tiered and concurrent (`TieredGuard`): low-risk,
+policy-allowed actions are allowed instantly while the model guard runs as a
+background audit; risky actions await the model guard with a timeout and fail
+**closed** on timeout or model failure.
+
+Disk persistence (`state.json`, `recent_steps.jsonl`, `compacted_history.md`,
+`approvals.jsonl`, `logs.jsonl`) and natural-language summarization via a model
+remain for a later milestone.

@@ -58,7 +58,7 @@ public actor InternalLocalModelProvider: LocalModelProvider {
         self.configuration = configuration ?? ModelProviderConfiguration(
             providerName: "internal-in-process",
             modelName: role.defaultModelName,
-            contextWindowSize: 8192,
+            contextWindowSize: 131_072,
             temperature: 0,
             timeoutSeconds: 1,
             supportsStreaming: false

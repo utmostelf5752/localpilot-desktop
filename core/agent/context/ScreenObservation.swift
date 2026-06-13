@@ -153,16 +153,48 @@ public struct LiveScreenObserver: ScreenObserving {
 public struct AgentContextBuilder: Sendable {
     private let screenObserver: any ScreenObserving
 
+    /// Upper bound on how many trailing chat messages the legacy builder keeps,
+    /// so the prompt can never grow unbounded with conversation length.
+    private static let maxMessageTail = 6
+
     public init(screenObserver: any ScreenObserving = LiveScreenObserver()) {
         self.screenObserver = screenObserver
     }
 
+    /// Legacy builder kept for the message-oriented call sites and tests.
+    /// Only the trailing `maxMessageTail` messages plus the single latest
+    /// observation are surfaced; no screenshot/base64 data ever enters the text.
     @MainActor
     public func makeContext(settings: AppSettings, messages: [ChatMessage]) async -> AgentContext {
         let observation = await screenObserver.capture()
-        let visibleText = (messages.map(\.text) + [observation.summary]).joined(separator: "\n")
+        let tail = messages.suffix(Self.maxMessageTail).map(\.text)
+        let visibleText = (tail + [observation.summary]).joined(separator: "\n")
 
-        return AgentContext(
+        return context(from: observation, settings: settings, visibleText: visibleText)
+    }
+
+    /// Lean builder used by the agent loop. Builds a short, fresh context from
+    /// the task line, the rolling history summary, the raw recent-step tail, and
+    /// ONLY the latest observation. Images are latest-only and never accumulate.
+    @MainActor
+    public func makeContext(settings: AppSettings, task: String, history: AgentHistory) async -> AgentContext {
+        let observation = await screenObserver.capture()
+
+        var parts: [String] = ["Task: \(task)"]
+        if !history.compactedSummary.isEmpty {
+            parts.append(history.compactedSummary)
+        }
+        if !history.recentSteps.isEmpty {
+            parts.append("Recent steps:\n" + history.recentSteps.joined(separator: "\n"))
+        }
+        parts.append("Latest observation: \(observation.summary)")
+        let visibleText = parts.joined(separator: "\n")
+
+        return context(from: observation, settings: settings, visibleText: visibleText)
+    }
+
+    private func context(from observation: ScreenObservation, settings: AppSettings, visibleText: String) -> AgentContext {
+        AgentContext(
             activeApp: observation.activeApp,
             activeWindow: observation.activeWindow,
             currentDomain: nil,

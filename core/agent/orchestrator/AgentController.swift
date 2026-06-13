@@ -31,6 +31,7 @@ public final class AgentController {
     @ObservationIgnored private var actionLoop: Task<Void, Never>?
     @ObservationIgnored private var activeTaskID: UUID?
     @ObservationIgnored private var approvalDecision: ApprovalDecision?
+    @ObservationIgnored private var history = AgentHistory()
 
     public init(
         logger: LocalEventLogger = LocalEventLogger(),
@@ -61,6 +62,7 @@ public final class AgentController {
 
         let taskID = UUID()
         activeTaskID = taskID
+        history = AgentHistory()
         state = LocalPilotState.empty
         state.taskID = taskID
         state.originalTask = task
@@ -211,8 +213,20 @@ public final class AgentController {
         }
 
         let planner = JSONActionPlanner(provider: plannerProvider)
-        let guardModel = JSONGuardModel(provider: guardProvider)
-        var context = await contextBuilder.makeContext(settings: settings, messages: messages)
+        let compactor = ContextCompactor(config: ContextCompactionConfig(
+            contextWindowTokens: max(1, settings.contextWindowSize),
+            compactionThreshold: ContextCompactionConfig.defaultValue.compactionThreshold,
+            rawTailRatio: ContextCompactionConfig.defaultValue.rawTailRatio
+        ))
+        let tieredGuard = TieredGuard(
+            model: JSONGuardModel(provider: guardProvider),
+            auditLog: { [weak self] decision in
+                Task { @MainActor in
+                    self?.log(event: "guard_audit", detail: "\(decision.decision.rawValue): \(decision.reason)")
+                }
+            }
+        )
+        var context = await contextBuilder.makeContext(settings: settings, task: task, history: history)
         state.lastObservationSummary = context.visibleText.components(separatedBy: "\n").last ?? ""
 
         do {
@@ -231,8 +245,11 @@ public final class AgentController {
                 guard runStatus == .running else { return }
 
                 currentActionLabel = "Observing screen"
-                context = await contextBuilder.makeContext(settings: settings, messages: messages)
+                context = await contextBuilder.makeContext(settings: settings, task: task, history: history)
                 state.lastObservationSummary = context.visibleText.components(separatedBy: "\n").last ?? ""
+                if compactor.shouldCompact(estimatedTokens: compactor.estimateTokens(context.visibleText)) {
+                    log(event: "context_compacted", detail: "Context kept lean: rolling summary plus recent step tail.")
+                }
                 log(event: "screen_observed", detail: state.lastObservationSummary)
 
                 currentActionLabel = "Planning action \(step)"
@@ -259,7 +276,7 @@ public final class AgentController {
 
                 if settings.useGuardModel {
                     currentActionLabel = "Guard review"
-                    let guardDecision = try await guardModel.review(action: action, context: context, policyDecision: policy)
+                    let guardDecision = await tieredGuard.decide(action: action, context: context, policyDecision: policy)
                     log(event: "guard_decision", detail: "\(guardDecision.decision.rawValue): \(guardDecision.reason)")
                     guard guardDecision.decision == .allow else {
                         blockTask(reason: guardDecision.reason, action: action)
@@ -267,11 +284,13 @@ public final class AgentController {
                     }
                 }
 
+                guard !Task.isCancelled, runStatus == .running else { return }
+
                 currentActionLabel = "Executing \(action.type.rawValue)"
                 let result = await executor.execute(action)
                 state.completedSteps.append(action.type.rawValue)
                 state.lastActionResult = result
-                context.visibleText += "\n\(result)"
+                history.record("\(action.type.rawValue): \(result)", compactor: compactor, maxRecent: 4)
                 appendLog(result)
                 log(event: "executor_result", detail: result)
 

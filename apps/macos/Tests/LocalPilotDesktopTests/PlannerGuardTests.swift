@@ -31,6 +31,27 @@ actor StubTextProvider: LocalModelProvider {
     }
 }
 
+actor ScriptedGuard: GuardModel {
+    let decision: GuardDecision
+    let delay: Duration
+    private(set) var reviewCount = 0
+
+    init(decision: GuardDecision, delay: Duration = .zero) {
+        self.decision = decision
+        self.delay = delay
+    }
+
+    func review(action: StructuredAction, context: AgentContext, policyDecision: PolicyDecision) async throws -> GuardDecision {
+        reviewCount += 1
+        if delay != .zero {
+            try await Task.sleep(for: delay)
+        }
+        return decision
+    }
+
+    func cancel() async {}
+}
+
 struct PlannerGuardTests {
     @Test
     func plannerParsesStructuredActionFromManagedModelJsonResponse() async throws {
@@ -58,5 +79,53 @@ struct PlannerGuardTests {
 
         #expect(decision.decision == .allow)
         #expect(decision.reason == "safe observation")
+    }
+
+    @Test
+    func tieredGuardAllowsLowRiskInstantlyWithoutBlockingOnModel() async {
+        // Model would deny, but a low-risk + policy-allow action takes the fast
+        // path and is allowed instantly; the model only runs as a concurrent audit.
+        let model = ScriptedGuard(decision: GuardDecision(decision: .deny, reason: "slow deny"), delay: .seconds(5))
+        let guardModel = TieredGuard(model: model, timeout: .seconds(5))
+        let action = StructuredAction(type: .observe, targetKind: "screen", targetText: "screen", expectedResult: "state", riskLevel: .low, reason: "observe")
+
+        let decision = await guardModel.decide(
+            action: action,
+            context: .empty,
+            policyDecision: .init(classification: .allow, reason: "allowed")
+        )
+
+        #expect(decision.decision == .allow)
+    }
+
+    @Test
+    func tieredGuardRespectsModelDenyOnRiskyAction() async {
+        let model = ScriptedGuard(decision: GuardDecision(decision: .deny, reason: "unsafe click"))
+        let guardModel = TieredGuard(model: model, timeout: .seconds(2))
+        let action = StructuredAction(type: .click, targetKind: "point", targetText: "Delete", coordinates: [10, 10], expectedResult: "click", riskLevel: .high, reason: "risky")
+
+        let decision = await guardModel.decide(
+            action: action,
+            context: .empty,
+            policyDecision: .init(classification: .askUser, reason: "needs review")
+        )
+
+        #expect(decision.decision == .deny)
+        #expect(decision.reason == "unsafe click")
+    }
+
+    @Test
+    func tieredGuardFailsClosedWhenModelTimesOut() async {
+        let model = ScriptedGuard(decision: GuardDecision(decision: .allow, reason: "too late"), delay: .seconds(5))
+        let guardModel = TieredGuard(model: model, timeout: .milliseconds(50))
+        let action = StructuredAction(type: .click, targetKind: "point", targetText: "Confirm", coordinates: [10, 10], expectedResult: "click", riskLevel: .high, reason: "risky")
+
+        let decision = await guardModel.decide(
+            action: action,
+            context: .empty,
+            policyDecision: .init(classification: .askUser, reason: "needs review")
+        )
+
+        #expect(decision.decision == .deny)
     }
 }

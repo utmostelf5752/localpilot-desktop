@@ -15,6 +15,12 @@ public enum ModelProviderMode: String, Codable, CaseIterable, Identifiable, Send
 }
 
 public struct AppSettings: Codable, Equatable, Sendable {
+    /// Maximum context window we ever request by default. We default the budget
+    /// high so capable local models can use their full window, while the
+    /// `ContextCompactor` keeps the actual payload tiny enough for small-window
+    /// models to still do real work.
+    public static let maximumContextWindowSize = 131_072
+
     public var modelProviderMode: ModelProviderMode
     public var runtimeExecutableURL: URL
     public var plannerModelURL: URL
@@ -50,7 +56,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         runtimeCompletionsPath: "/v1/localpilot/complete",
         plannerModel: "planner.gguf",
         guardModel: "guard.gguf",
-        contextWindowSize: 8192,
+        contextWindowSize: Self.maximumContextWindowSize,
         temperature: 0.1,
         timeoutSeconds: 60,
         unloadModelsAfterRun: true,
