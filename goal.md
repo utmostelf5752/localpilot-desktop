@@ -209,8 +209,12 @@ Required control loop:
 10. State manager updates state and logs.
 11. Repeat until task is done, paused, stopped, or blocked.
 
-No multi-action batches in v1.
-The planner may propose exactly one action per turn.
+The planner may propose either a single action or a short ordered plan
+({"actions":[ ... ]}, up to 6 steps). Plans are proposals only: the orchestrator
+re-validates each action (policy + guard), executes them one at a time,
+re-observes between steps, and aborts the rest of the plan to re-plan if a step
+fails. Stop and Pause are honored between every action. Ungated batches are
+never executed directly.
 
 Action schema:
 The planner may only output one of these action types:
@@ -718,7 +722,9 @@ Coding standards:
 - No deletion features in v1.
 - No personal info autofill in v1.
 - No unapproved domains in v1.
-- No multi-action batches in v1.
+- One action executed at a time: planned multi-action is allowed, but each
+  action is independently gated and executed one at a time, never as an ungated
+  batch.
 - Prefer explicit state machines over loose flags.
 - Prefer structured JSON over natural language where possible.
 - Fail closed when uncertain.

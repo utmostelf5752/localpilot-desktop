@@ -68,6 +68,45 @@ struct PlannerGuardTests {
     }
 
     @Test
+    func plannerParsesMultiActionPlan() async throws {
+        let provider = StubTextProvider(completions: [
+            #"{"actions":[{"type":"observe","target_kind":"screen","target_text":"screen","expected_result":"state","risk_level":"low","reason":"look"},{"type":"finish","target_kind":"task","target_text":"task","expected_result":"done","risk_level":"low","reason":"complete"}]}"#
+        ])
+        let planner = JSONActionPlanner(provider: provider)
+
+        let actions = try await planner.proposeActions(originalTask: "do it", context: .empty, recentMessages: [])
+
+        #expect(actions.count == 2)
+        #expect(actions.first?.type == .observe)
+        #expect(actions.last?.type == .finish)
+    }
+
+    @Test
+    func plannerFallsBackToSingleActionObjectForPlans() async throws {
+        let provider = StubTextProvider(completions: [
+            #"{"type":"wait","target_kind":"timer","target_text":"a beat","expected_result":"delay","risk_level":"low","reason":"wait"}"#
+        ])
+        let planner = JSONActionPlanner(provider: provider)
+
+        let actions = try await planner.proposeActions(originalTask: "wait", context: .empty, recentMessages: [])
+
+        #expect(actions.count == 1)
+        #expect(actions.first?.type == .wait)
+    }
+
+    @Test
+    func plannerCapsPlanToMaxActions() async throws {
+        let item = #"{"type":"observe","target_kind":"screen","target_text":"s","expected_result":"r","risk_level":"low","reason":"x"}"#
+        let items = Array(repeating: item, count: 10).joined(separator: ",")
+        let provider = StubTextProvider(completions: ["{\"actions\":[\(items)]}"])
+        let planner = JSONActionPlanner(provider: provider)
+
+        let actions = try await planner.proposeActions(originalTask: "t", context: .empty, recentMessages: [], maxActions: 3)
+
+        #expect(actions.count == 3)
+    }
+
+    @Test
     func guardParsesAllowDenyOnlyDecision() async throws {
         let provider = StubTextProvider(completions: [
             #"{"decision":"allow","reason":"safe observation"}"#

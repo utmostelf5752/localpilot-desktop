@@ -88,6 +88,20 @@ public struct StructuredAction: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// An ordered plan of one or more actions proposed in a single planner turn.
+///
+/// The planner may look ahead and propose several steps at once, but this is
+/// only a *proposal*: the orchestrator still gates and executes each action one
+/// at a time (policy + guard + Stop/Pause checks + re-observation between
+/// steps). No action in a plan executes without passing the full pipeline.
+public struct ActionPlan: Codable, Equatable, Sendable {
+    public let actions: [StructuredAction]
+
+    public init(actions: [StructuredAction]) {
+        self.actions = actions
+    }
+}
+
 public struct AgentContext: Codable, Equatable, Sendable {
     public var activeApp: String?
     public var activeWindow: String?

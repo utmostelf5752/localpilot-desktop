@@ -40,6 +40,38 @@ public struct JSONActionPlanner: Sendable {
         return try decoder.decode(StructuredAction.self, from: data)
     }
 
+    /// Propose an ordered plan of up to `maxActions` actions. The model may
+    /// return either a single action object or `{"actions":[...]}`. Either way
+    /// the orchestrator gates and executes each action one at a time.
+    public func proposeActions(
+        originalTask: String,
+        context: AgentContext,
+        recentMessages: [ChatMessage],
+        maxActions: Int = 6
+    ) async throws -> [StructuredAction] {
+        let response = try await provider.complete(
+            prompt: plannerPrompt(originalTask: originalTask, context: context, recentMessages: recentMessages),
+            system: Self.planSystemPrompt,
+            format: .json
+        )
+        let data = Data(response.utf8)
+
+        let actions: [StructuredAction]
+        if let plan = try? decoder.decode(ActionPlan.self, from: data) {
+            actions = plan.actions
+        } else {
+            // Fall back to a single action object for models that ignore the
+            // plan envelope; this also keeps small models working.
+            actions = [try decoder.decode(StructuredAction.self, from: data)]
+        }
+
+        let bounded = Array(actions.prefix(max(1, maxActions)))
+        guard !bounded.isEmpty else {
+            throw PlannerError.emptyPlan
+        }
+        return bounded
+    }
+
     private func plannerPrompt(originalTask: String, context: AgentContext, recentMessages: [ChatMessage]) -> String {
         """
         Original task:
@@ -60,4 +92,26 @@ public struct JSONActionPlanner: Sendable {
     Return JSON only. Do not include markdown. Prefer observe, wait, ask_user, or finish when uncertain.
     The model never controls the OS directly; it only proposes an action.
     """
+
+    private static let planSystemPrompt = """
+    You are the LocalPilot planner. Return JSON only, no markdown.
+    Propose the next step or a short ordered plan of up to 6 steps as
+    {"actions":[ ... ]}, where each item is a structured action. A single action
+    object is also accepted. Only chain steps you are confident about; the app
+    re-checks the screen and re-validates every action, and will stop early if a
+    step does not match the new screen state. Prefer observe, wait, ask_user, or
+    finish when uncertain. The model never controls the OS directly; it only
+    proposes actions, and every action passes policy and guard review.
+    """
+}
+
+public enum PlannerError: LocalizedError, Sendable {
+    case emptyPlan
+
+    public var errorDescription: String? {
+        switch self {
+        case .emptyPlan:
+            "Planner returned an empty action plan."
+        }
+    }
 }

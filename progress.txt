@@ -141,5 +141,9 @@ Current progress
   recognized in-process tasks such as open URL, switch app, press key, type,
   scroll, click coordinates, double-click coordinates, and restricted terminal
   commands.
+- [x] Planned multi-action: the planner may propose a short ordered plan, and
+  the orchestrator gates each action (policy + guard), executes one at a time,
+  re-observes between steps, and aborts/re-plans on failure while keeping
+  Stop/Pause responsive between every action.
 - [ ] A general embedded local ML backend that can reason over arbitrary screen
   tasks is still not implemented.

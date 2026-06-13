@@ -6,7 +6,10 @@ The deterministic policy engine is the primary safety boundary. The guard model 
 
 The initial `DeterministicPolicyEngine` enforces:
 
-- no multi-action batches;
+- one action executed at a time: the planner may propose a short ordered plan,
+  but the orchestrator gates each action individually (policy + guard) and
+  executes them one at a time with re-observation between steps; raw, ungated
+  batches submitted to `classifyBatch` are still rejected;
 - deletion and dangerous terminal command fragments are blocked;
 - sensitive typing is blocked in v1;
 - unapproved domains require user approval;
@@ -23,9 +26,12 @@ The app now also exposes a native approval review sheet for `ask_user` decisions
 - No unapproved websites.
 - No unrestricted terminal commands.
 - No clipboard reading by default.
-- No multi-action batches.
-- One structured action at a time.
-- Stop and Pause are independent from the model.
+- One action executed at a time. The planner may propose an ordered plan, but
+  every action is independently re-validated (policy + guard) and executed one
+  at a time, with re-observation between steps and early abort/re-plan on
+  failure. No action runs without passing the full pipeline.
+- Stop and Pause are independent from the model and are honored between every
+  action, including within a multi-action plan.
 - Model sessions are closed after Stop, blocked tasks, and completed tasks when `Unload models after each run` is enabled.
 - Mouse, double-click, keyboard, scroll, copy, approved paste, URL open,
   terminal command, and app-switch execution remain behind the app-owned
