@@ -30,6 +30,12 @@ public struct StructuredAction: Codable, Equatable, Identifiable, Sendable {
     public let targetKind: String
     public let targetText: String
     public let coordinates: [Double]?
+    /// Optional accessibility-element id, referencing the numbered elements in
+    /// the latest observation. When set on a click/double_click/type_text_safe
+    /// action, the executor resolves it to a concrete click point instead of
+    /// using raw `coordinates`. This is an additive field: it never changes the
+    /// action's type or its policy/guard risk classification.
+    public let targetElementID: Int?
     public let text: String?
     public let command: String?
     public let expectedResult: String
@@ -42,6 +48,7 @@ public struct StructuredAction: Codable, Equatable, Identifiable, Sendable {
         case targetKind = "target_kind"
         case targetText = "target_text"
         case coordinates
+        case targetElementID = "target_element_id"
         case text
         case command
         case expectedResult = "expected_result"
@@ -55,6 +62,7 @@ public struct StructuredAction: Codable, Equatable, Identifiable, Sendable {
         targetKind: String,
         targetText: String,
         coordinates: [Double]? = nil,
+        targetElementID: Int? = nil,
         text: String? = nil,
         command: String? = nil,
         expectedResult: String,
@@ -66,6 +74,7 @@ public struct StructuredAction: Codable, Equatable, Identifiable, Sendable {
         self.targetKind = targetKind
         self.targetText = targetText
         self.coordinates = coordinates
+        self.targetElementID = targetElementID
         self.text = text
         self.command = command
         self.expectedResult = expectedResult
@@ -80,6 +89,7 @@ public struct StructuredAction: Codable, Equatable, Identifiable, Sendable {
         self.targetKind = try container.decode(String.self, forKey: .targetKind)
         self.targetText = try container.decode(String.self, forKey: .targetText)
         self.coordinates = try container.decodeIfPresent([Double].self, forKey: .coordinates)
+        self.targetElementID = try container.decodeIfPresent(Int.self, forKey: .targetElementID)
         self.text = try container.decodeIfPresent(String.self, forKey: .text)
         self.command = try container.decodeIfPresent(String.self, forKey: .command)
         self.expectedResult = try container.decode(String.self, forKey: .expectedResult)

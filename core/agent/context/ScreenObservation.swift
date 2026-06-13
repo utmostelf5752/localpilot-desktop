@@ -3,6 +3,41 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
+/// A single actionable accessibility element captured during one observation.
+///
+/// `id` is a traversal-order index that is stable *within one observation*
+/// only: it lets the planner reference an element by number ("click element 3")
+/// and lets the executor resolve that id back to a concrete click point by
+/// re-observing the screen. Coordinates are in global display space, matching
+/// the coordinate space the executor's click controller expects.
+public struct AXElementSnapshot: Codable, Equatable, Sendable {
+    public let id: Int          // traversal-order index, stable within one observation
+    public let role: String     // e.g. AXButton, AXTextField (AX prefix may be stripped)
+    public let label: String    // best of title/value/description, trimmed
+    public let centerX: Double
+    public let centerY: Double
+    public let width: Double
+    public let height: Double
+
+    public init(
+        id: Int,
+        role: String,
+        label: String,
+        centerX: Double,
+        centerY: Double,
+        width: Double,
+        height: Double
+    ) {
+        self.id = id
+        self.role = role
+        self.label = label
+        self.centerX = centerX
+        self.centerY = centerY
+        self.width = width
+        self.height = height
+    }
+}
+
 public struct ScreenObservation: Codable, Equatable, Sendable {
     public let activeApp: String?
     public let activeWindow: String?
@@ -10,6 +45,7 @@ public struct ScreenObservation: Codable, Equatable, Sendable {
     public let screenshotHeight: Int?
     public let screenshotPNGBase64: String?
     public let accessibilitySummary: String?
+    public let elements: [AXElementSnapshot]
 
     public init(
         activeApp: String?,
@@ -17,7 +53,8 @@ public struct ScreenObservation: Codable, Equatable, Sendable {
         screenshotWidth: Int?,
         screenshotHeight: Int?,
         screenshotPNGBase64: String?,
-        accessibilitySummary: String?
+        accessibilitySummary: String?,
+        elements: [AXElementSnapshot] = []
     ) {
         self.activeApp = activeApp
         self.activeWindow = activeWindow
@@ -25,6 +62,7 @@ public struct ScreenObservation: Codable, Equatable, Sendable {
         self.screenshotHeight = screenshotHeight
         self.screenshotPNGBase64 = screenshotPNGBase64
         self.accessibilitySummary = accessibilitySummary
+        self.elements = elements
     }
 
     public var summary: String {
@@ -43,7 +81,52 @@ public struct ScreenObservation: Codable, Equatable, Sendable {
             parts.append(accessibilitySummary)
         }
 
+        if !elements.isEmpty {
+            parts.append(Self.elementsSummary(elements))
+        }
+
         return parts.joined(separator: "; ")
+    }
+
+    /// Compact, capped rendering of the actionable elements, e.g.
+    /// `elements: [0] button "Save", [1] textfield "Search"`.
+    /// Caps the count (~20) and truncates each label (~40 chars) so the
+    /// element list cannot dominate the planner context.
+    private static func elementsSummary(_ elements: [AXElementSnapshot]) -> String {
+        let maxElements = 20
+        let maxLabel = 40
+        let rendered = elements.prefix(maxElements).map { element -> String in
+            let role = element.role.lowercased()
+            var label = element.label
+            if label.count > maxLabel {
+                label = String(label.prefix(maxLabel)) + "…"
+            }
+            return "[\(element.id)] \(role) \"\(label)\""
+        }
+        return "elements: " + rendered.joined(separator: ", ")
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case activeApp
+        case activeWindow
+        case screenshotWidth
+        case screenshotHeight
+        case screenshotPNGBase64
+        case accessibilitySummary
+        case elements
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.activeApp = try container.decodeIfPresent(String.self, forKey: .activeApp)
+        self.activeWindow = try container.decodeIfPresent(String.self, forKey: .activeWindow)
+        self.screenshotWidth = try container.decodeIfPresent(Int.self, forKey: .screenshotWidth)
+        self.screenshotHeight = try container.decodeIfPresent(Int.self, forKey: .screenshotHeight)
+        self.screenshotPNGBase64 = try container.decodeIfPresent(String.self, forKey: .screenshotPNGBase64)
+        self.accessibilitySummary = try container.decodeIfPresent(String.self, forKey: .accessibilitySummary)
+        // Decode the element list when present; absent JSON (older payloads,
+        // 6-field literals) decodes to an empty list rather than failing.
+        self.elements = try container.decodeIfPresent([AXElementSnapshot].self, forKey: .elements) ?? []
     }
 }
 
@@ -66,7 +149,8 @@ public struct LiveScreenObserver: ScreenObserving {
             screenshotWidth: screenshot.width,
             screenshotHeight: screenshot.height,
             screenshotPNGBase64: screenshot.pngBase64,
-            accessibilitySummary: Self.accessibilitySummary()
+            accessibilitySummary: Self.accessibilitySummary(),
+            elements: Self.collectActionableElements()
         )
     }
 
@@ -147,6 +231,119 @@ public struct LiveScreenObserver: ScreenObserving {
             return nil
         }
         return value as? String
+    }
+
+    /// Roles we treat as directly actionable for element targeting. These are
+    /// the controls a planner would want to click or type into.
+    private static let actionableRoles: Set<String> = [
+        kAXButtonRole as String,
+        kAXLinkRole as String,
+        kAXTextFieldRole as String,
+        kAXTextAreaRole as String,
+        kAXMenuItemRole as String,
+        kAXCheckBoxRole as String,
+        kAXRadioButtonRole as String,
+        kAXPopUpButtonRole as String
+    ]
+
+    /// Walk the focused window's AX subtree and collect actionable elements
+    /// (with geometry) for element-targeted clicks. Returns an empty list if AX
+    /// permission is absent or no frontmost app is available, so callers never
+    /// crash on missing accessibility access.
+    private static func collectActionableElements() -> [AXElementSnapshot] {
+        guard AXIsProcessTrusted() else { return [] }
+        guard let app = NSWorkspace.shared.frontmostApplication else { return [] }
+
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        var focusedWindow: CFTypeRef?
+        let windowResult = AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedWindow)
+        let root = windowResult == .success ? focusedWindow as! AXUIElement : appElement
+
+        var snapshots: [AXElementSnapshot] = []
+        var nextID = 0
+        collectElements(from: root, into: &snapshots, nextID: &nextID, depth: 0)
+        return snapshots
+    }
+
+    private static let maxElements = 30
+    private static let maxElementDepth = 6
+
+    private static func collectElements(
+        from element: AXUIElement,
+        into snapshots: inout [AXElementSnapshot],
+        nextID: inout Int,
+        depth: Int
+    ) {
+        guard depth <= maxElementDepth, snapshots.count < maxElements else { return }
+
+        let rawRole = stringAttribute(kAXRoleAttribute, from: element)
+        if let rawRole, actionableRoles.contains(rawRole), let frame = elementFrame(of: element) {
+            let label = bestLabel(of: element)
+            let role = rawRole.hasPrefix("AX") ? String(rawRole.dropFirst(2)) : rawRole
+            snapshots.append(
+                AXElementSnapshot(
+                    id: nextID,
+                    role: role,
+                    label: label,
+                    centerX: Double(frame.midX),
+                    centerY: Double(frame.midY),
+                    width: Double(frame.width),
+                    height: Double(frame.height)
+                )
+            )
+            nextID += 1
+        }
+
+        var childrenRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement] else {
+            return
+        }
+
+        for child in children {
+            if snapshots.count >= maxElements { return }
+            collectElements(from: child, into: &snapshots, nextID: &nextID, depth: depth + 1)
+        }
+    }
+
+    private static func bestLabel(of element: AXUIElement) -> String {
+        let candidates = [
+            stringAttribute(kAXTitleAttribute, from: element),
+            stringAttribute(kAXValueAttribute, from: element),
+            stringAttribute(kAXDescriptionAttribute, from: element)
+        ]
+        for candidate in candidates {
+            let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return ""
+    }
+
+    /// Read an element's global frame from `kAXPositionAttribute`/`kAXSizeAttribute`.
+    /// These come back as `AXValue` boxes carrying a `CGPoint`/`CGSize`, unpacked
+    /// with `AXValueGetValue` into local CG structs.
+    private static func elementFrame(of element: AXUIElement) -> CGRect? {
+        var positionRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionRef) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let positionValue = positionRef, let sizeValue = sizeRef else {
+            return nil
+        }
+
+        // CFTypeRef bridges to AXValue here; cast back so AXValueGetValue can
+        // unpack the boxed CGPoint/CGSize.
+        let axPosition = positionValue as! AXValue
+        let axSize = sizeValue as! AXValue
+
+        var point = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(axPosition, .cgPoint, &point),
+              AXValueGetValue(axSize, .cgSize, &size) else {
+            return nil
+        }
+
+        return CGRect(origin: point, size: size)
     }
 }
 

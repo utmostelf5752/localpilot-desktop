@@ -313,6 +313,147 @@ struct ActionExecutorTests {
     }
 
     @Test
+    func clickWithTargetElementIDResolvesToElementCenter() async {
+        let observer = StubScreenObserver(observation: ScreenObservation(
+            activeApp: "Notes",
+            activeWindow: "Untitled",
+            screenshotWidth: 100,
+            screenshotHeight: 100,
+            screenshotPNGBase64: "abc",
+            accessibilitySummary: nil,
+            elements: [
+                AXElementSnapshot(id: 0, role: "Button", label: "Save", centerX: 150, centerY: 250, width: 80, height: 30)
+            ]
+        ))
+        let controller = SpyComputerController()
+        let executor = LocalPilotActionExecutor(
+            screenObserver: observer,
+            computerController: controller,
+            dryRun: false
+        )
+        let action = StructuredAction(
+            type: .click,
+            targetKind: "element",
+            targetText: "Save",
+            targetElementID: 0,
+            expectedResult: "clicked",
+            riskLevel: .low,
+            reason: "test"
+        )
+
+        let result = await executor.execute(action)
+
+        #expect(result == "Clicked Save at 150,250.")
+        #expect(await controller.clicks == [CGPoint(x: 150, y: 250)])
+    }
+
+    @Test
+    func clickWithUnknownTargetElementIDIsBlocked() async {
+        let observer = StubScreenObserver(observation: ScreenObservation(
+            activeApp: "Notes",
+            activeWindow: "Untitled",
+            screenshotWidth: 100,
+            screenshotHeight: 100,
+            screenshotPNGBase64: "abc",
+            accessibilitySummary: nil,
+            elements: []
+        ))
+        let controller = SpyComputerController()
+        let executor = LocalPilotActionExecutor(
+            screenObserver: observer,
+            computerController: controller,
+            dryRun: false
+        )
+        let action = StructuredAction(
+            type: .click,
+            targetKind: "element",
+            targetText: "Save",
+            targetElementID: 7,
+            expectedResult: "clicked",
+            riskLevel: .low,
+            reason: "test"
+        )
+
+        let result = await executor.execute(action)
+
+        #expect(result == "Click blocked: element 7 not found.")
+        #expect(await controller.clicks.isEmpty)
+    }
+
+    @Test
+    func typeTextSafeWithTargetElementIDFocusesThenTypes() async {
+        let observer = StubScreenObserver(observation: ScreenObservation(
+            activeApp: "Notes",
+            activeWindow: "Untitled",
+            screenshotWidth: 100,
+            screenshotHeight: 100,
+            screenshotPNGBase64: "abc",
+            accessibilitySummary: nil,
+            elements: [
+                AXElementSnapshot(id: 2, role: "TextField", label: "Search", centerX: 60, centerY: 90, width: 200, height: 24)
+            ]
+        ))
+        let controller = SpyComputerController()
+        let executor = LocalPilotActionExecutor(
+            screenObserver: observer,
+            computerController: controller,
+            dryRun: false
+        )
+        let action = StructuredAction(
+            type: .typeTextSafe,
+            targetKind: "element",
+            targetText: "Search",
+            targetElementID: 2,
+            text: "hello",
+            expectedResult: "typed",
+            riskLevel: .low,
+            reason: "test"
+        )
+
+        let result = await executor.execute(action)
+
+        #expect(result == "Typed safe text into Search at 60,90.")
+        #expect(await controller.clicks == [CGPoint(x: 60, y: 90)])
+        #expect(await controller.typedText == ["hello"])
+    }
+
+    @Test
+    func dryRunClickWithTargetElementIDDoesNotObserveOrClick() async {
+        let observer = StubScreenObserver(observation: ScreenObservation(
+            activeApp: "Notes",
+            activeWindow: "Untitled",
+            screenshotWidth: 100,
+            screenshotHeight: 100,
+            screenshotPNGBase64: "abc",
+            accessibilitySummary: nil,
+            elements: [
+                AXElementSnapshot(id: 0, role: "Button", label: "Save", centerX: 10, centerY: 20, width: 4, height: 4)
+            ]
+        ))
+        let controller = SpyComputerController()
+        let executor = LocalPilotActionExecutor(
+            screenObserver: observer,
+            computerController: controller,
+            dryRun: true
+        )
+        let action = StructuredAction(
+            type: .click,
+            targetKind: "element",
+            targetText: "Save",
+            targetElementID: 0,
+            expectedResult: "clicked",
+            riskLevel: .low,
+            reason: "test"
+        )
+
+        let result = await executor.execute(action)
+
+        #expect(result.contains("Dry-run only"))
+        #expect(observer.captureCount == 0)
+        #expect(await controller.clicks.isEmpty)
+    }
+
+    @Test
     func nonFiniteAndNegativeCoordinatesAreRejected() async {
         let controller = SpyComputerController()
         let executor = LocalPilotActionExecutor(computerController: controller, dryRun: false)

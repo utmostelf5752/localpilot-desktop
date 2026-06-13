@@ -68,6 +68,33 @@ struct PlannerGuardTests {
     }
 
     @Test
+    func plannerParsesTargetElementIDFromJson() async throws {
+        let provider = StubTextProvider(completions: [
+            #"{"type":"click","target_kind":"element","target_text":"Save","target_element_id":3,"expected_result":"clicked","risk_level":"low","reason":"click the save button"}"#
+        ])
+        let planner = JSONActionPlanner(provider: provider)
+
+        let action = try await planner.proposeOneAction(originalTask: "save", context: .empty, recentMessages: [])
+
+        #expect(action.type == .click)
+        #expect(action.targetElementID == 3)
+        #expect(action.coordinates == nil)
+    }
+
+    @Test
+    func plannerDefaultsTargetElementIDToNilWhenAbsent() async throws {
+        let provider = StubTextProvider(completions: [
+            #"{"type":"click","target_kind":"point","target_text":"Save","coordinates":[10,20],"expected_result":"clicked","risk_level":"low","reason":"click"}"#
+        ])
+        let planner = JSONActionPlanner(provider: provider)
+
+        let action = try await planner.proposeOneAction(originalTask: "save", context: .empty, recentMessages: [])
+
+        #expect(action.targetElementID == nil)
+        #expect(action.coordinates == [10, 20])
+    }
+
+    @Test
     func plannerParsesMultiActionPlan() async throws {
         let provider = StubTextProvider(completions: [
             #"{"actions":[{"type":"observe","target_kind":"screen","target_text":"screen","expected_result":"state","risk_level":"low","reason":"look"},{"type":"finish","target_kind":"task","target_text":"task","expected_result":"done","risk_level":"low","reason":"complete"}]}"#

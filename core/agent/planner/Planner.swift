@@ -83,6 +83,12 @@ public struct JSONActionPlanner: Sendable {
         current_domain=\(context.currentDomain ?? "none")
         visible_text=\(context.visibleText)
 
+        When the visible_text lists numbered "elements: [n] role \"label\"",
+        prefer targeting one of them by setting "target_element_id" to that
+        number for click, double_click, and type_text_safe actions, instead of
+        guessing raw "coordinates". Only fall back to coordinates when no listed
+        element matches.
+
         Return exactly one JSON object matching the LocalPilot action schema.
         """
     }

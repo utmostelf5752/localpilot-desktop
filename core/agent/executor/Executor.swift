@@ -221,17 +221,47 @@ public actor LocalPilotActionExecutor: ActionExecutor {
             return "Asked user for input."
         case .click:
             guard !dryRun else { return dryRunResult(for: action) }
-            guard let point = action.point else { return "Click blocked: coordinates are missing." }
+            let point: CGPoint
+            if let elementID = action.targetElementID {
+                switch await resolveElement(id: elementID) {
+                case .resolved(let resolved): point = resolved
+                case .notFound(let message): return message
+                }
+            } else {
+                guard let coordinatePoint = action.point else { return "Click blocked: coordinates are missing." }
+                point = coordinatePoint
+            }
             await computerController.click(at: point)
             return "Clicked \(action.targetText) at \(Int(point.x)),\(Int(point.y))."
         case .doubleClick:
             guard !dryRun else { return dryRunResult(for: action) }
-            guard let point = action.point else { return "Double-click blocked: coordinates are missing." }
+            let point: CGPoint
+            if let elementID = action.targetElementID {
+                switch await resolveElement(id: elementID) {
+                case .resolved(let resolved): point = resolved
+                case .notFound(let message): return message
+                }
+            } else {
+                guard let coordinatePoint = action.point else { return "Double-click blocked: coordinates are missing." }
+                point = coordinatePoint
+            }
             await computerController.doubleClick(at: point)
             return "Double-clicked \(action.targetText) at \(Int(point.x)),\(Int(point.y))."
         case .typeTextSafe:
             guard !dryRun else { return dryRunResult(for: action) }
             guard let text = action.text, !text.isEmpty else { return "Typing blocked: text is missing." }
+            // If an element id is given, focus the field by clicking its center
+            // before typing; otherwise type into whatever is currently focused.
+            if let elementID = action.targetElementID {
+                switch await resolveElement(id: elementID) {
+                case .resolved(let point):
+                    await computerController.click(at: point)
+                    await computerController.typeText(text)
+                    return "Typed safe text into \(action.targetText) at \(Int(point.x)),\(Int(point.y))."
+                case .notFound(let message):
+                    return message
+                }
+            }
             await computerController.typeText(text)
             return "Typed safe text into \(action.targetText)."
         case .scroll:
@@ -293,6 +323,24 @@ public actor LocalPilotActionExecutor: ActionExecutor {
 
     private func dryRunResult(for action: StructuredAction) -> String {
         "Dry-run only: \(action.type.rawValue) was validated but no OS control was performed."
+    }
+
+    private enum ElementResolution {
+        case resolved(CGPoint)
+        case notFound(String)
+    }
+
+    /// Resolve an accessibility element id to a click point by re-observing the
+    /// screen. Ids are traversal-order indices that are only stable within a
+    /// single observation, so we capture a fresh one here rather than trusting a
+    /// stale list. Returns a clear blocked string when the id is absent so the
+    /// loop's failure heuristic re-plans instead of clicking the wrong spot.
+    private func resolveElement(id: Int) async -> ElementResolution {
+        let observation = await screenObserver.capture()
+        guard let element = observation.elements.first(where: { $0.id == id }) else {
+            return .notFound("Click blocked: element \(id) not found.")
+        }
+        return .resolved(CGPoint(x: element.centerX, y: element.centerY))
     }
 }
 
