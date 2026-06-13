@@ -93,9 +93,17 @@ private struct ChatBubbleView: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text(message.role.rawValue.capitalized)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Image(systemName: roleIcon)
+                        .font(.caption2)
+                    Text(roleLabel)
+                        .font(.caption.weight(.semibold))
+                    Spacer(minLength: 8)
+                    Text(message.timestamp, format: .dateTime.hour().minute())
+                        .font(.caption2)
+                        .monospacedDigit()
+                }
+                .foregroundStyle(.secondary)
                 Text(message.text)
                     .textSelection(.enabled)
             }
@@ -106,6 +114,22 @@ private struct ChatBubbleView: View {
             if message.role != .user {
                 Spacer(minLength: 80)
             }
+        }
+    }
+
+    private var roleLabel: String {
+        switch message.role {
+        case .user: "You"
+        case .agent: "LocalPilot"
+        case .system: "System"
+        }
+    }
+
+    private var roleIcon: String {
+        switch message.role {
+        case .user: "person.fill"
+        case .agent: "sparkle"
+        case .system: "info.circle"
         }
     }
 

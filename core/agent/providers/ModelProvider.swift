@@ -286,12 +286,23 @@ public struct HTTPRequest: Sendable {
     public let method: String
     public let headers: [String: String]
     public let body: Data?
+    /// Per-request timeout. When non-nil and positive it is applied to the
+    /// underlying `URLRequest.timeoutInterval` so callers can honor the
+    /// provider's configured `timeoutSeconds`.
+    public let timeoutSeconds: TimeInterval?
 
-    public init(url: URL, method: String, headers: [String: String] = [:], body: Data? = nil) {
+    public init(
+        url: URL,
+        method: String,
+        headers: [String: String] = [:],
+        body: Data? = nil,
+        timeoutSeconds: TimeInterval? = nil
+    ) {
         self.url = url
         self.method = method
         self.headers = headers
         self.body = body
+        self.timeoutSeconds = timeoutSeconds
     }
 
     public var jsonBody: [String: Any]? {
@@ -327,6 +338,9 @@ public struct URLSessionHTTPClient: HTTPClient {
         urlRequest.httpBody = request.body
         for header in request.headers {
             urlRequest.setValue(header.value, forHTTPHeaderField: header.key)
+        }
+        if let timeoutSeconds = request.timeoutSeconds, timeoutSeconds > 0 {
+            urlRequest.timeoutInterval = timeoutSeconds
         }
 
         let (data, response) = try await session.data(for: urlRequest)
@@ -397,16 +411,27 @@ public protocol ManagedModelRuntime: Sendable {
 
 public actor ProcessManagedModelRuntime: ManagedModelRuntime {
     private let httpClient: HTTPClient
+    /// Seconds to wait for the runtime to report healthy before giving up.
+    private let healthCheckTimeout: TimeInterval
     private var process: Process?
     private var endpoint: URL?
+    /// Pipes are retained so we can detach their readability handlers on stop.
+    private var stdoutPipe: Pipe?
+    private var stderrPipe: Pipe?
 
-    public init(httpClient: HTTPClient = URLSessionHTTPClient()) {
+    public init(httpClient: HTTPClient = URLSessionHTTPClient(), healthCheckTimeout: TimeInterval = 8) {
         self.httpClient = httpClient
+        self.healthCheckTimeout = healthCheckTimeout
     }
 
     public func ensureRunning(configuration: ManagedModelRuntimeConfiguration) async throws -> URL {
         if let process, process.isRunning, let endpoint {
             return endpoint
+        }
+
+        // A previously launched process may have exited; clean it up before relaunching.
+        if process != nil {
+            teardownProcess(kill: false)
         }
 
         guard FileManager.default.isExecutableFile(atPath: configuration.executableURL.path) else {
@@ -422,51 +447,111 @@ public actor ProcessManagedModelRuntime: ManagedModelRuntime {
                 .replacingOccurrences(of: "{port}", with: String(configuration.port))
         }
         process.environment = ProcessInfo.processInfo.environment.merging(configuration.environment) { _, new in new }
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
+
+        // Drain stdout/stderr continuously. Without this the OS pipe buffer
+        // (typically 64KB) fills up and the model subprocess blocks forever on
+        // its next write, deadlocking startup.
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+            _ = handle.availableData
+        }
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            _ = handle.availableData
+        }
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
 
         do {
             try process.run()
         } catch {
+            stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
             throw ModelProviderError.runtimeLaunchFailed(error.localizedDescription)
         }
 
         self.process = process
+        self.stdoutPipe = stdoutPipe
+        self.stderrPipe = stderrPipe
         self.endpoint = configuration.endpoint
-        try await waitUntilHealthy(configuration: configuration)
+        do {
+            try await waitUntilHealthy(configuration: configuration, process: process)
+        } catch {
+            // Tear down the half-started process so we don't leak it / leave a zombie.
+            teardownProcess(kill: true)
+            throw error
+        }
         return configuration.endpoint
     }
 
     public func stop() {
+        teardownProcess(kill: true)
+    }
+
+    /// Terminates and reaps the managed process, detaching pipe handlers.
+    /// When `kill` is true the process is escalated from SIGTERM to SIGKILL if
+    /// it does not exit promptly.
+    private func teardownProcess(kill: Bool) {
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+        stderrPipe?.fileHandleForReading.readabilityHandler = nil
+        stdoutPipe = nil
+        stderrPipe = nil
+
         guard let process else {
             endpoint = nil
             return
         }
         if process.isRunning {
-            process.terminate()
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) {
+            process.terminate() // SIGTERM: request graceful shutdown.
+            if kill {
+                // Escalate to SIGKILL if it is still alive after a short grace period.
+                let deadline = Date().addingTimeInterval(1)
+                while process.isRunning, Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
                 if process.isRunning {
-                    process.interrupt()
+                    kill_(process.processIdentifier)
                 }
             }
+        }
+        // Reap so the OS does not retain a zombie entry.
+        if process.isRunning {
+            process.waitUntilExit()
         }
         self.process = nil
         endpoint = nil
     }
 
-    private func waitUntilHealthy(configuration: ManagedModelRuntimeConfiguration) async throws {
-        let deadline = Date().addingTimeInterval(8)
+    private nonisolated func kill_(_ pid: pid_t) {
+        // SIGKILL (9) cannot be caught; guarantees the runtime is gone.
+        Foundation.kill(pid, SIGKILL)
+    }
+
+    private func waitUntilHealthy(configuration: ManagedModelRuntimeConfiguration, process: Process) async throws {
+        let deadline = Date().addingTimeInterval(healthCheckTimeout)
         let healthURL = configuration.endpoint.appending(path: normalizedPath(configuration.healthPath))
 
         while Date() < deadline {
+            // If the subprocess exited (e.g. bad model file) stop polling immediately.
+            if !process.isRunning {
+                throw ModelProviderError.runtimeLaunchFailed(
+                    "Runtime exited during startup (status \(process.terminationStatus))."
+                )
+            }
             do {
-                let response = try await httpClient.data(for: HTTPRequest(url: healthURL, method: "GET"))
+                // Bound each probe so a connected-but-hung server cannot block
+                // past the overall health-check deadline (the loop only re-checks
+                // `deadline` between probes, so an unbounded request would stall).
+                let response = try await httpClient.data(for: HTTPRequest(
+                    url: healthURL,
+                    method: "GET",
+                    timeoutSeconds: max(1, healthCheckTimeout / 4)
+                ))
                 if (200..<300).contains(response.statusCode) {
                     return
                 }
             } catch {
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                continue
+                // Connection refused while the server is still binding is expected; retry.
             }
             try? await Task.sleep(nanoseconds: 200_000_000)
         }
@@ -495,14 +580,20 @@ public actor ManagedLocalModelProvider: LocalModelProvider {
     }
 
     public func complete(prompt: String, system: String?, format: ModelResponseFormat?) async throws -> String {
+        // Cancel any previously in-flight completion before starting a new one so
+        // overlapping calls don't leak tasks or clobber `activeTask` bookkeeping.
+        activeTask?.cancel()
+
         let task = Task<String, Error> {
-            let endpoint = try await runtime.ensureRunning(configuration: runtimeConfiguration)
+            try Task.checkCancellation()
+            let endpoint = try await self.runtime.ensureRunning(configuration: self.runtimeConfiguration)
+            try Task.checkCancellation()
             var payload: [String: Any] = [
-                "model": configuration.modelName,
+                "model": self.configuration.modelName,
                 "prompt": prompt,
                 "stream": false,
                 "options": [
-                    "temperature": configuration.temperature
+                    "temperature": self.configuration.temperature
                 ]
             ]
             if let system {
@@ -512,18 +603,37 @@ public actor ManagedLocalModelProvider: LocalModelProvider {
                 payload["format"] = "json"
             }
 
-            let response = try await postCompletion(endpoint: endpoint, payload: payload)
-            return try decodeCompletionResponse(response)
+            let response = try await self.postCompletion(endpoint: endpoint, payload: payload)
+            try Task.checkCancellation()
+            return try self.decodeCompletionResponse(response)
         }
         activeTask = task
-        defer { activeTask = nil }
-        return try await task.value
+        defer {
+            // Only clear if it is still the task we installed; a concurrent
+            // completion may already have replaced it.
+            if activeTask == task {
+                activeTask = nil
+            }
+        }
+        // Propagate cancellation of the *calling* task (e.g. the orchestrator's
+        // action loop being cancelled) into the spawned unstructured task.
+        // Awaiting `task.value` alone does not forward structured cancellation,
+        // so without this an aborted run would leak an in-flight HTTP request.
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     public func healthCheck() async throws {
         let endpoint = try await runtime.ensureRunning(configuration: runtimeConfiguration)
         let url = endpoint.appending(path: normalizedPath(runtimeConfiguration.healthPath))
-        let response = try await httpClient.data(for: HTTPRequest(url: url, method: "GET"))
+        let response = try await httpClient.data(for: HTTPRequest(
+            url: url,
+            method: "GET",
+            timeoutSeconds: configuration.timeoutSeconds
+        ))
         guard (200..<300).contains(response.statusCode) else {
             throw ModelProviderError.badStatus(response.statusCode, String(data: response.data, encoding: .utf8) ?? "")
         }
@@ -545,7 +655,8 @@ public actor ManagedLocalModelProvider: LocalModelProvider {
             url: url,
             method: "POST",
             headers: ["Content-Type": "application/json"],
-            body: body
+            body: body,
+            timeoutSeconds: configuration.timeoutSeconds
         ))
         guard (200..<300).contains(response.statusCode) else {
             throw ModelProviderError.badStatus(response.statusCode, String(data: response.data, encoding: .utf8) ?? "")
@@ -557,10 +668,11 @@ public actor ManagedLocalModelProvider: LocalModelProvider {
         struct CompletionResponse: Decodable {
             let response: String?
             let text: String?
+            let content: String?
         }
 
         guard let decoded = try? JSONDecoder().decode(CompletionResponse.self, from: data),
-              let response = decoded.response ?? decoded.text else {
+              let response = decoded.response ?? decoded.text ?? decoded.content else {
             throw ModelProviderError.invalidResponse
         }
         return response

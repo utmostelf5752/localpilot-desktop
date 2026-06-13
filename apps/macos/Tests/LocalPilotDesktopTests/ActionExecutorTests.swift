@@ -241,4 +241,93 @@ struct ActionExecutorTests {
         #expect(await controller.pastedText.isEmpty)
         #expect(await controller.terminalCommands.isEmpty)
     }
+
+    @Test
+    func pausedExecutorBlocksOSControl() async {
+        let controller = SpyComputerController()
+        let executor = LocalPilotActionExecutor(computerController: controller, dryRun: false)
+
+        await executor.setPaused(true)
+        let result = await executor.execute(StructuredAction(
+            type: .click, targetKind: "point", targetText: "Search",
+            coordinates: [10, 20], expectedResult: "clicked", riskLevel: .low, reason: "test"
+        ))
+
+        #expect(result == "Executor paused.")
+        #expect(await controller.clicks.isEmpty)
+    }
+
+    @Test
+    func stoppedExecutorBlocksOSControl() async {
+        let controller = SpyComputerController()
+        let executor = LocalPilotActionExecutor(computerController: controller, dryRun: false)
+
+        await executor.stopImmediately()
+        let result = await executor.execute(StructuredAction(
+            type: .click, targetKind: "point", targetText: "Search",
+            coordinates: [10, 20], expectedResult: "clicked", riskLevel: .low, reason: "test"
+        ))
+
+        #expect(result == "Executor disabled.")
+        #expect(await controller.clicks.isEmpty)
+    }
+
+    @Test
+    func pauseThenUnpauseRestoresExecution() async {
+        let controller = SpyComputerController()
+        let executor = LocalPilotActionExecutor(computerController: controller, dryRun: false)
+
+        await executor.setPaused(true)
+        let paused = await executor.execute(StructuredAction(
+            type: .click, targetKind: "point", targetText: "Search",
+            coordinates: [10, 20], expectedResult: "clicked", riskLevel: .low, reason: "test"
+        ))
+        #expect(paused == "Executor paused.")
+
+        await executor.setPaused(false)
+        let resumed = await executor.execute(StructuredAction(
+            type: .click, targetKind: "point", targetText: "Search",
+            coordinates: [10, 20], expectedResult: "clicked", riskLevel: .low, reason: "test"
+        ))
+        #expect(resumed == "Clicked Search at 10,20.")
+        #expect(await controller.clicks == [CGPoint(x: 10, y: 20)])
+    }
+
+    @Test
+    func emptyKeyPressIsBlocked() async {
+        let controller = SpyComputerController()
+        let executor = LocalPilotActionExecutor(computerController: controller, dryRun: false)
+
+        let result = await executor.execute(StructuredAction(
+            type: .pressKey,
+            targetKind: "keyboard",
+            targetText: "   ",
+            text: nil,
+            expectedResult: "pressed",
+            riskLevel: .low,
+            reason: "test"
+        ))
+
+        #expect(result.contains("key name is missing"))
+        #expect(await controller.keys.isEmpty)
+    }
+
+    @Test
+    func nonFiniteAndNegativeCoordinatesAreRejected() async {
+        let controller = SpyComputerController()
+        let executor = LocalPilotActionExecutor(computerController: controller, dryRun: false)
+
+        let negative = await executor.execute(StructuredAction(
+            type: .click, targetKind: "point", targetText: "Search",
+            coordinates: [-1, 50], expectedResult: "clicked", riskLevel: .low, reason: "test"
+        ))
+        let nan = await executor.execute(StructuredAction(
+            type: .click, targetKind: "point", targetText: "Search",
+            coordinates: [.nan, 50], expectedResult: "clicked", riskLevel: .low, reason: "test"
+        ))
+
+        #expect(negative.contains("coordinates are missing"))
+        #expect(nan.contains("coordinates are missing"))
+        #expect(await controller.clicks.isEmpty)
+    }
 }

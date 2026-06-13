@@ -241,7 +241,10 @@ public actor LocalPilotActionExecutor: ActionExecutor {
             return "Scrolled \(action.targetText) by \(delta)."
         case .pressKey:
             guard !dryRun else { return dryRunResult(for: action) }
-            let key = (action.text ?? action.targetText).lowercased()
+            let key = (action.text ?? action.targetText)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard !key.isEmpty else { return "Key press blocked: key name is missing." }
             await computerController.pressKey(named: key)
             return "Pressed \(key)."
         case .copy:
@@ -336,11 +339,22 @@ public actor StubActionExecutor: ActionExecutor {
 private extension StructuredAction {
     var point: CGPoint? {
         guard let coordinates, coordinates.count >= 2 else { return nil }
-        return CGPoint(x: coordinates[0], y: coordinates[1])
+        let x = coordinates[0]
+        let y = coordinates[1]
+        // Reject non-finite or negative coordinates: a NaN/Infinity would crash
+        // when later converted to Int, and off-screen negatives indicate a
+        // malformed action rather than a real target.
+        guard x.isFinite, y.isFinite, x >= 0, y >= 0 else { return nil }
+        return CGPoint(x: x, y: y)
     }
 
     var scrollDeltaY: Int32 {
-        guard let coordinates, coordinates.count >= 2 else { return -5 }
-        return Int32(coordinates[1])
+        guard let coordinates, coordinates.count >= 2, coordinates[1].isFinite else { return -5 }
+        // Clamp to Int32 range so a malformed huge value cannot trap on
+        // conversion; Int32(_:) crashes on out-of-range Doubles.
+        let raw = coordinates[1].rounded()
+        if raw >= Double(Int32.max) { return Int32.max }
+        if raw <= Double(Int32.min) { return Int32.min }
+        return Int32(raw)
     }
 }

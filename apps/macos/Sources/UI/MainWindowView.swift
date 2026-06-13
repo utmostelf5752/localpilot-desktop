@@ -27,35 +27,88 @@ struct MainWindowView: View {
         }
         .onAppear {
             OverlayWindowManager.shared.configure(controller: controller)
+            // Reconcile overlay visibility on first appearance too, in case the
+            // controller is already in a non-idle state when the window opens
+            // (e.g. after a restored session). `onChange` alone would miss this.
+            OverlayWindowManager.shared.setVisible(shouldShowOverlay, controller: controller)
         }
-        .onChange(of: controller.overlayState) { _, state in
-            OverlayWindowManager.shared.setVisible(state != .idle, controller: controller)
+        .onChange(of: controller.overlayState) { _, _ in
+            OverlayWindowManager.shared.setVisible(shouldShowOverlay, controller: controller)
         }
-        .sheet(isPresented: Binding(
-            get: { controller.runStatus == .paused && controller.pendingApproval == nil },
-            set: { _ in }
-        )) {
-            PauseSheetView(
-                instruction: $continueInstruction,
-                continueAction: {
-                    controller.continueTask(instruction: continueInstruction)
-                    continueInstruction = ""
-                },
-                stopAction: {
-                    controller.stop()
-                    continueInstruction = ""
-                }
-            )
+        // The approval sheet is hosted by the *main* window. The overlay window
+        // sits at `.screenSaver` level and covers the entire screen, so while it
+        // is visible it would obscure (and block clicks to) that sheet. When an
+        // approval is pending we therefore hide the overlay so the user can
+        // actually reach the Allow/Deny controls. The floating controls already
+        // direct the user to the main window for approvals, so nothing in the
+        // overlay is lost by hiding it during this window.
+        .onChange(of: controller.pendingApproval) { _, _ in
+            OverlayWindowManager.shared.setVisible(shouldShowOverlay, controller: controller)
         }
+        // A single sheet driven by a derived enum. Presenting two separate
+        // `.sheet` modifiers on the same view is unreliable in SwiftUI (the
+        // second may silently fail to present, or the first may dismiss the
+        // second). An approval request always takes precedence over the plain
+        // pause sheet, because `requestApproval` sets both `runStatus == .paused`
+        // and a non-nil `pendingApproval` at the same time.
         .sheet(item: Binding(
-            get: { controller.pendingApproval },
+            get: { activeSheet },
             set: { _ in }
-        )) { approval in
-            ApprovalReviewSheet(
-                approval: approval,
-                allowAction: controller.approvePendingAction,
-                denyAction: controller.denyPendingAction
-            )
+        )) { sheet in
+            switch sheet {
+            case .approval(let approval):
+                ApprovalReviewSheet(
+                    approval: approval,
+                    allowAction: controller.approvePendingAction,
+                    denyAction: controller.denyPendingAction
+                )
+            case .pause:
+                PauseSheetView(
+                    instruction: $continueInstruction,
+                    continueAction: {
+                        controller.continueTask(instruction: continueInstruction)
+                        continueInstruction = ""
+                    },
+                    stopAction: {
+                        controller.stop()
+                        continueInstruction = ""
+                    }
+                )
+            }
+        }
+    }
+
+    /// The overlay should be visible whenever the agent is in a non-idle overlay
+    /// state, EXCEPT while an approval is pending: in that case the main-window
+    /// approval sheet must be reachable, and the full-screen overlay would cover
+    /// it. Hiding the overlay here is what lets the Allow/Deny buttons be clicked.
+    private var shouldShowOverlay: Bool {
+        guard controller.pendingApproval == nil else { return false }
+        return controller.overlayState != .idle
+    }
+
+    /// Derives which modal (if any) should be presented from the controller's
+    /// observable state. Approval wins over the pause sheet so the two can never
+    /// fight to present simultaneously.
+    private var activeSheet: ActiveSheet? {
+        if let approval = controller.pendingApproval {
+            return .approval(approval)
+        }
+        if controller.runStatus == .paused {
+            return .pause
+        }
+        return nil
+    }
+}
+
+private enum ActiveSheet: Identifiable {
+    case pause
+    case approval(PendingApproval)
+
+    var id: String {
+        switch self {
+        case .pause: "pause"
+        case .approval(let approval): "approval-\(approval.id.uuidString)"
         }
     }
 }
@@ -119,7 +172,11 @@ private struct InspectorPanelView: View {
 
             Text("Recent logs")
                 .font(.headline)
-            ForEach(controller.recentLogSnippets, id: \.self) { item in
+            // Log snippets can legitimately repeat (e.g. identical executor
+            // results), so identify by position to keep IDs unique. Using
+            // `id: \.self` on a `[String]` with duplicates yields undefined
+            // diffing behavior in SwiftUI.
+            ForEach(Array(controller.recentLogSnippets.enumerated()), id: \.offset) { _, item in
                 Text(item)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -281,7 +338,7 @@ private struct LogsPanelView: View {
                 .font(.callout.monospaced())
                 .textSelection(.enabled)
             Divider()
-            ForEach(controller.recentLogSnippets, id: \.self) { item in
+            ForEach(Array(controller.recentLogSnippets.enumerated()), id: \.offset) { _, item in
                 Text(item)
                     .font(.body)
             }

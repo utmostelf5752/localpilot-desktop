@@ -29,11 +29,19 @@ public actor LocalEventLogger {
         guard let data = try? encoder.encode(event) else { return }
         let line = data + Data([0x0A])
 
-        if FileManager.default.fileExists(atPath: fileURL.path) {
-            if let handle = try? FileHandle(forWritingTo: fileURL) {
-                defer { try? handle.close() }
-                _ = try? handle.seekToEnd()
-                try? handle.write(contentsOf: line)
+        // Serialized by the actor, so there is no inter-task append race. We
+        // still guard against the file having been removed between calls and
+        // fall back to an atomic create-write if the append handle can't open.
+        if FileManager.default.fileExists(atPath: fileURL.path),
+           let handle = try? FileHandle(forWritingTo: fileURL) {
+            defer { try? handle.close() }
+            do {
+                _ = try handle.seekToEnd()
+                try handle.write(contentsOf: line)
+            } catch {
+                // Appending failed (e.g. file truncated/removed underneath us);
+                // recreate the file so the event isn't silently dropped.
+                try? line.write(to: fileURL, options: .atomic)
             }
         } else {
             try? line.write(to: fileURL, options: .atomic)
