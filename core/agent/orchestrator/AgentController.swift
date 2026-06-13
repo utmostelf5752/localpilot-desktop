@@ -212,7 +212,7 @@ public final class AgentController {
             manager.register(guardProvider)
         }
 
-        let planner = JSONActionPlanner(provider: plannerProvider)
+        let planner = JSONActionPlanner(provider: plannerProvider, structuredOutput: settings.useStructuredDecoding)
         let compactor = ContextCompactor(config: ContextCompactionConfig(
             contextWindowTokens: max(1, settings.contextWindowSize),
             compactionThreshold: ContextCompactionConfig.defaultValue.compactionThreshold,

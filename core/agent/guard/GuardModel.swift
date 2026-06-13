@@ -37,7 +37,7 @@ public struct JSONGuardModel: GuardModel {
         let response = try await provider.complete(
             prompt: guardPrompt(action: action, context: context, policyDecision: policyDecision),
             system: Self.systemPrompt,
-            format: .json
+            format: .jsonSchema(name: "localpilot_guard", schema: StructuredOutputSchema.guardDecision)
         )
         return try decoder.decode(GuardDecision.self, from: Data(response.utf8))
     }

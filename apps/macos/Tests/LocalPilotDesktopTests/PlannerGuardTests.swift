@@ -52,6 +52,35 @@ actor ScriptedGuard: GuardModel {
     func cancel() async {}
 }
 
+/// Records the `format` it was last asked to complete with, so tests can assert
+/// the planner forwards the expected structured-output mode.
+actor FormatCapturingProvider: LocalModelProvider {
+    let configuration: ModelProviderConfiguration
+    let canned: String
+    private(set) var lastFormat: ModelResponseFormat?
+
+    init(canned: String) {
+        self.canned = canned
+        self.configuration = ModelProviderConfiguration(
+            providerName: "capture",
+            modelName: "capture-model",
+            contextWindowSize: 4096,
+            temperature: 0,
+            timeoutSeconds: 1,
+            supportsStreaming: false
+        )
+    }
+
+    func complete(prompt: String, system: String?, format: ModelResponseFormat?) async throws -> String {
+        lastFormat = format
+        return canned
+    }
+
+    func healthCheck() async throws {}
+    func cancel() async {}
+    func closeModel() async throws {}
+}
+
 struct PlannerGuardTests {
     @Test
     func plannerParsesStructuredActionFromManagedModelJsonResponse() async throws {
@@ -131,6 +160,32 @@ struct PlannerGuardTests {
         let actions = try await planner.proposeActions(originalTask: "t", context: .empty, recentMessages: [], maxActions: 3)
 
         #expect(actions.count == 3)
+    }
+
+    @Test
+    func plannerPassesJsonSchemaFormatWhenStructuredOutputEnabled() async throws {
+        let canned = #"{"actions":[{"type":"wait","target_kind":"timer","target_text":"a beat","expected_result":"delay","risk_level":"low","reason":"wait"}]}"#
+        let provider = FormatCapturingProvider(canned: canned)
+        let planner = JSONActionPlanner(provider: provider, structuredOutput: true)
+
+        _ = try await planner.proposeActions(originalTask: "t", context: .empty, recentMessages: [])
+
+        let format = await provider.lastFormat
+        guard case .jsonSchema = format else {
+            Issue.record("Expected .jsonSchema format, got \(String(describing: format))")
+            return
+        }
+    }
+
+    @Test
+    func plannerPassesPlainJsonFormatWhenStructuredOutputDisabled() async throws {
+        let canned = #"{"actions":[{"type":"wait","target_kind":"timer","target_text":"a beat","expected_result":"delay","risk_level":"low","reason":"wait"}]}"#
+        let provider = FormatCapturingProvider(canned: canned)
+        let planner = JSONActionPlanner(provider: provider, structuredOutput: false)
+
+        _ = try await planner.proposeActions(originalTask: "t", context: .empty, recentMessages: [])
+
+        #expect(await provider.lastFormat == .json)
     }
 
     @Test

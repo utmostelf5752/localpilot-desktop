@@ -24,17 +24,19 @@ public struct StubPlannerModel: PlannerModel {
 
 public struct JSONActionPlanner: Sendable {
     private let provider: any LocalModelProvider
+    private let structuredOutput: Bool
     private let decoder = JSONDecoder()
 
-    public init(provider: any LocalModelProvider) {
+    public init(provider: any LocalModelProvider, structuredOutput: Bool = true) {
         self.provider = provider
+        self.structuredOutput = structuredOutput
     }
 
     public func proposeOneAction(originalTask: String, context: AgentContext, recentMessages: [ChatMessage]) async throws -> StructuredAction {
         let response = try await provider.complete(
             prompt: plannerPrompt(originalTask: originalTask, context: context, recentMessages: recentMessages),
             system: Self.systemPrompt,
-            format: .json
+            format: structuredOutput ? .jsonSchema(name: "localpilot_action", schema: StructuredOutputSchema.action) : .json
         )
         let data = Data(response.utf8)
         return try decoder.decode(StructuredAction.self, from: data)
@@ -52,7 +54,7 @@ public struct JSONActionPlanner: Sendable {
         let response = try await provider.complete(
             prompt: plannerPrompt(originalTask: originalTask, context: context, recentMessages: recentMessages),
             system: Self.planSystemPrompt,
-            format: .json
+            format: structuredOutput ? .jsonSchema(name: "localpilot_plan", schema: StructuredOutputSchema.plan) : .json
         )
         let data = Data(response.utf8)
 

@@ -2,6 +2,10 @@ import Foundation
 
 public enum ModelResponseFormat: Sendable, Equatable {
     case json
+    /// Constrain decoding to a JSON Schema document. `schema` is the schema as a
+    /// JSON string; `name` is a runtime-facing label. String payloads keep the
+    /// enum auto-Sendable and auto-Equatable.
+    case jsonSchema(name: String, schema: String)
 }
 
 public struct ModelProviderConfiguration: Codable, Equatable, Sendable {
@@ -599,8 +603,24 @@ public actor ManagedLocalModelProvider: LocalModelProvider {
             if let system {
                 payload["system"] = system
             }
-            if format == .json {
+            switch format {
+            case .json:
                 payload["format"] = "json"
+            case let .jsonSchema(_, schema):
+                // Honor whichever local runtime is configured: Ollama reads the
+                // schema object from `format`, llama.cpp-server reads it from
+                // `json_schema`. If the schema string is not valid JSON, fall
+                // back to plain JSON mode so a bad schema never breaks completion.
+                if let schemaData = schema.data(using: .utf8),
+                   let schemaObject = try? JSONSerialization.jsonObject(with: schemaData),
+                   schemaObject is [String: Any] {
+                    payload["format"] = schemaObject
+                    payload["json_schema"] = schemaObject
+                } else {
+                    payload["format"] = "json"
+                }
+            case .none:
+                break
             }
 
             let response = try await self.postCompletion(endpoint: endpoint, payload: payload)

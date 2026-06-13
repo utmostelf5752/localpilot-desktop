@@ -136,6 +136,60 @@ struct ManagedLocalModelProviderTests {
     }
 
     @Test
+    func completeSendsJsonSchemaObjectUnderFormatAndJsonSchema() async throws {
+        let client = MockHTTPClient()
+        let runtime = StubManagedRuntime()
+        await client.enqueue(HTTPResponse(data: Data(#"{"response":"{}"}"#.utf8), statusCode: 200))
+        let provider = ManagedLocalModelProvider(
+            configuration: makeConfig(),
+            runtimeConfiguration: makeRuntimeConfig(),
+            runtime: runtime,
+            httpClient: client
+        )
+
+        _ = try await provider.complete(
+            prompt: "Return JSON",
+            system: nil,
+            format: .jsonSchema(name: "x", schema: StructuredOutputSchema.action)
+        )
+
+        let requests = await client.requests
+        #expect(requests.count == 1)
+        let body = try #require(requests[0].jsonBody)
+        // The schema is sent as an object (not the string "json") under both keys
+        // so Ollama (`format`) and llama.cpp-server (`json_schema`) can honor it.
+        #expect(body["format"] as? String == nil)
+        let formatObject = try #require(body["format"] as? [String: Any])
+        #expect(formatObject["type"] as? String == "object")
+        let schemaObject = try #require(body["json_schema"] as? [String: Any])
+        #expect(schemaObject["type"] as? String == "object")
+    }
+
+    @Test
+    func completeFallsBackToJsonStringForUnparseableSchema() async throws {
+        let client = MockHTTPClient()
+        let runtime = StubManagedRuntime()
+        await client.enqueue(HTTPResponse(data: Data(#"{"response":"{}"}"#.utf8), statusCode: 200))
+        let provider = ManagedLocalModelProvider(
+            configuration: makeConfig(),
+            runtimeConfiguration: makeRuntimeConfig(),
+            runtime: runtime,
+            httpClient: client
+        )
+
+        _ = try await provider.complete(
+            prompt: "Return JSON",
+            system: nil,
+            format: .jsonSchema(name: "x", schema: "not valid json")
+        )
+
+        let requests = await client.requests
+        let body = try #require(requests[0].jsonBody)
+        #expect(body["format"] as? String == "json")
+        #expect(body["json_schema"] == nil)
+    }
+
+    @Test
     func closeModelStopsManagedRuntimeImmediately() async throws {
         let client = MockHTTPClient()
         let runtime = StubManagedRuntime()
@@ -300,5 +354,56 @@ struct ManagedLocalModelProviderTests {
         await #expect(throws: Error.self) {
             _ = try await completion.value
         }
+    }
+}
+
+struct StructuredOutputSchemaTests {
+    @Test
+    func actionSchemaParsesAndDescribesTheActionShape() throws {
+        let json = StructuredOutputSchema.action
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+        )
+
+        #expect(object["type"] as? String == "object")
+        #expect(object["additionalProperties"] as? Bool == false)
+
+        let properties = try #require(object["properties"] as? [String: Any])
+        // target_element_id must be present so element-targeting survives the
+        // structured-output constraint.
+        #expect(properties["target_element_id"] != nil)
+
+        let typeProperty = try #require(properties["type"] as? [String: Any])
+        let typeEnum = try #require(typeProperty["enum"] as? [String])
+        #expect(typeEnum.contains("click"))
+        #expect(typeEnum.contains("observe"))
+        // The enum is derived from ActionType.allCases, so every case appears.
+        #expect(typeEnum.count == ActionType.allCases.count)
+    }
+
+    @Test
+    func planSchemaWrapsActionsArrayWithBounds() throws {
+        let json = StructuredOutputSchema.plan
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+        )
+        let properties = try #require(object["properties"] as? [String: Any])
+        let actions = try #require(properties["actions"] as? [String: Any])
+        #expect(actions["type"] as? String == "array")
+        #expect(actions["minItems"] as? Int == 1)
+        #expect(actions["maxItems"] as? Int == 6)
+        #expect(actions["items"] is [String: Any])
+    }
+
+    @Test
+    func guardSchemaConstrainsDecisionEnum() throws {
+        let json = StructuredOutputSchema.guardDecision
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+        )
+        let properties = try #require(object["properties"] as? [String: Any])
+        let decision = try #require(properties["decision"] as? [String: Any])
+        let decisionEnum = try #require(decision["enum"] as? [String])
+        #expect(decisionEnum == ["allow", "deny"])
     }
 }

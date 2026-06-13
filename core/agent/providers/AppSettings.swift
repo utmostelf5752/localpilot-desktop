@@ -39,6 +39,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var unloadModelsAfterRun: Bool
     public var useGuardModel: Bool
     public var dryRunExecutionOnly: Bool
+    public var useStructuredDecoding: Bool
     public var allowedDomains: [String]
     public var allowedApps: [String]
     public var allowedFolders: [String]
@@ -62,6 +63,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         unloadModelsAfterRun: true,
         useGuardModel: true,
         dryRunExecutionOnly: true,
+        useStructuredDecoding: true,
         allowedDomains: [],
         allowedApps: [],
         allowedFolders: []
@@ -143,6 +145,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case unloadModelsAfterRun
         case useGuardModel
         case dryRunExecutionOnly
+        case useStructuredDecoding
         case allowedDomains
         case allowedApps
         case allowedFolders
@@ -167,6 +170,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         unloadModelsAfterRun: Bool,
         useGuardModel: Bool,
         dryRunExecutionOnly: Bool,
+        useStructuredDecoding: Bool,
         allowedDomains: [String],
         allowedApps: [String],
         allowedFolders: [String]
@@ -189,6 +193,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.unloadModelsAfterRun = unloadModelsAfterRun
         self.useGuardModel = useGuardModel
         self.dryRunExecutionOnly = dryRunExecutionOnly
+        self.useStructuredDecoding = useStructuredDecoding
         self.allowedDomains = allowedDomains
         self.allowedApps = allowedApps
         self.allowedFolders = allowedFolders
@@ -215,6 +220,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         unloadModelsAfterRun = try container.decodeIfPresent(Bool.self, forKey: .unloadModelsAfterRun) ?? defaults.unloadModelsAfterRun
         useGuardModel = try container.decodeIfPresent(Bool.self, forKey: .useGuardModel) ?? defaults.useGuardModel
         dryRunExecutionOnly = try container.decodeIfPresent(Bool.self, forKey: .dryRunExecutionOnly) ?? defaults.dryRunExecutionOnly
+        useStructuredDecoding = try container.decodeIfPresent(Bool.self, forKey: .useStructuredDecoding) ?? defaults.useStructuredDecoding
         allowedDomains = try container.decodeIfPresent([String].self, forKey: .allowedDomains) ?? defaults.allowedDomains
         allowedApps = try container.decodeIfPresent([String].self, forKey: .allowedApps) ?? defaults.allowedApps
         allowedFolders = try container.decodeIfPresent([String].self, forKey: .allowedFolders) ?? defaults.allowedFolders
