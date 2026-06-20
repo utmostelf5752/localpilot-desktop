@@ -1,0 +1,62 @@
+name: Release macOS DMG
+
+# Build a downloadable .dmg whenever a version tag is pushed (e.g. v0.1.0),
+# or manually via the Actions tab.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build Release app (ad-hoc signed)
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project LocalPilotDesktop.xcodeproj \
+            -scheme LocalPilotDesktop \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO CODE_SIGN_STYLE=Manual \
+            clean build
+
+      - name: Package .dmg
+        run: |
+          set -euo pipefail
+          APP="$(find build/Build/Products/Release -maxdepth 1 -name '*.app' | head -1)"
+          echo "App: $APP"
+          STAGE="$(mktemp -d)"
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          mkdir -p dist
+          hdiutil create -volname "LocalPilot Desktop" \
+            -srcfolder "$STAGE" -ov -format UDZO dist/LocalPilotDesktop.dmg
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/LocalPilotDesktop.dmg
+          generate_release_notes: true
+          body: |
+            LocalPilot Desktop for macOS.
+
+            **Install:** open the .dmg and drag the app to Applications. The build
+            is not notarized — on first launch, right-click the app → Open → Open.
+
+            **Requires:** macOS 14+, and a local model server (Ollama or LM Studio)
+            running. In Settings, pick your provider, set the base URL, click
+            Detect Models, choose a model, then start a task.
