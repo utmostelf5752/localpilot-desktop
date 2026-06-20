@@ -2,6 +2,7 @@ import Foundation
 
 public enum ActionType: String, Codable, Sendable, CaseIterable {
     case observe
+    case moveCursor = "move_cursor"
     case click
     case doubleClick = "double_click"
     case typeTextSafe = "type_text_safe"
@@ -13,6 +14,11 @@ public enum ActionType: String, Codable, Sendable, CaseIterable {
     case openURL = "open_url"
     case runTerminalCommand = "run_terminal_command"
     case switchApp = "switch_app"
+    /// A short ordered macro of tightly-coupled sub-actions (e.g. click a field
+    /// then type) executed without re-observing between them. Each sub-action is
+    /// still independently classified by policy and reviewed by the guard before
+    /// it runs — `batch` is an ergonomic grouping, never an ungated bypass.
+    case batch
     case wait
     case finish
     case askUser = "ask_user"
@@ -38,6 +44,9 @@ public struct StructuredAction: Codable, Equatable, Identifiable, Sendable {
     public let targetElementID: Int?
     public let text: String?
     public let command: String?
+    /// Sub-actions for a `batch` action. Each is independently policy-classified
+    /// and guard-reviewed before execution. Nil for every non-batch action.
+    public let actions: [StructuredAction]?
     public let expectedResult: String
     public let riskLevel: RiskLevel
     public let reason: String
@@ -51,6 +60,7 @@ public struct StructuredAction: Codable, Equatable, Identifiable, Sendable {
         case targetElementID = "target_element_id"
         case text
         case command
+        case actions
         case expectedResult = "expected_result"
         case riskLevel = "risk_level"
         case reason
@@ -65,6 +75,7 @@ public struct StructuredAction: Codable, Equatable, Identifiable, Sendable {
         targetElementID: Int? = nil,
         text: String? = nil,
         command: String? = nil,
+        actions: [StructuredAction]? = nil,
         expectedResult: String,
         riskLevel: RiskLevel,
         reason: String
@@ -77,6 +88,7 @@ public struct StructuredAction: Codable, Equatable, Identifiable, Sendable {
         self.targetElementID = targetElementID
         self.text = text
         self.command = command
+        self.actions = actions
         self.expectedResult = expectedResult
         self.riskLevel = riskLevel
         self.reason = reason
@@ -92,6 +104,10 @@ public struct StructuredAction: Codable, Equatable, Identifiable, Sendable {
         self.targetElementID = try container.decodeIfPresent(Int.self, forKey: .targetElementID)
         self.text = try container.decodeIfPresent(String.self, forKey: .text)
         self.command = try container.decodeIfPresent(String.self, forKey: .command)
+        // Sub-actions are decoded one level deep; a batch's children are never
+        // themselves batches (the structured-output schema forbids it), so this
+        // recursion is bounded.
+        self.actions = try container.decodeIfPresent([StructuredAction].self, forKey: .actions)
         self.expectedResult = try container.decode(String.self, forKey: .expectedResult)
         self.riskLevel = try container.decode(RiskLevel.self, forKey: .riskLevel)
         self.reason = try container.decode(String.self, forKey: .reason)
@@ -121,6 +137,36 @@ public struct AgentContext: Codable, Equatable, Sendable {
     public var allowedFolders: Set<String>
     public var visibleText: String
     public var activeFieldKind: String?
+    /// Latest downscaled JPEG screenshot as base64, attached to the planner
+    /// request only when vision is enabled. Never accumulates across steps.
+    public var screenshotJPEGBase64: String?
+    /// Short summaries of actions the policy/guard already denied this run, so the
+    /// planner can avoid re-proposing them. A never-summarized context layer.
+    public var deniedActionSummaries: [String]
+
+    public init(
+        activeApp: String?,
+        activeWindow: String?,
+        currentDomain: String?,
+        allowedDomains: Set<String>,
+        allowedApps: Set<String>,
+        allowedFolders: Set<String>,
+        visibleText: String,
+        activeFieldKind: String?,
+        screenshotJPEGBase64: String? = nil,
+        deniedActionSummaries: [String] = []
+    ) {
+        self.activeApp = activeApp
+        self.activeWindow = activeWindow
+        self.currentDomain = currentDomain
+        self.allowedDomains = allowedDomains
+        self.allowedApps = allowedApps
+        self.allowedFolders = allowedFolders
+        self.visibleText = visibleText
+        self.activeFieldKind = activeFieldKind
+        self.screenshotJPEGBase64 = screenshotJPEGBase64
+        self.deniedActionSummaries = deniedActionSummaries
+    }
 
     public static let empty = AgentContext(
         activeApp: nil,

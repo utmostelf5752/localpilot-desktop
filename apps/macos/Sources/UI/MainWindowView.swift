@@ -201,34 +201,54 @@ private struct SettingsPanelView: View {
 
     var body: some View {
         Form {
-            Section("Managed Local Runtime") {
-                Picker("Model provider", selection: $controller.settings.modelProviderMode) {
+            Section("Model Provider") {
+                Picker("Provider", selection: $controller.settings.modelProviderMode) {
                     ForEach(ModelProviderMode.allCases) { mode in
                         Text(mode.displayName).tag(mode)
                     }
                 }
-                .pickerStyle(.segmented)
-                TextField("Runtime executable", text: urlBinding(\.runtimeExecutableURL))
-                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
-                TextField("Planner model file", text: urlBinding(\.plannerModelURL))
-                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
-                TextField("Guard model file", text: urlBinding(\.guardModelURL))
-                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
-                TextField("Planner model", text: $controller.settings.plannerModel)
-                TextField("Guard model", text: $controller.settings.guardModel)
-                TextField("Host", text: $controller.settings.runtimeHost)
-                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
-                Stepper("Port: \(controller.settings.runtimePort)", value: $controller.settings.runtimePort, in: 1024...65535, step: 1)
-                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
-                TextField("Launch arguments", text: stringListBinding(\.runtimeLaunchArguments))
-                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
-                TextField("Health path", text: $controller.settings.runtimeHealthPath)
-                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
-                TextField("Completion path", text: $controller.settings.runtimeCompletionsPath)
-                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
+                .onChange(of: controller.settings.modelProviderMode) { _, newMode in
+                    // Apply the backend's default endpoint and refresh its model
+                    // list so the user only sets the base URL, not raw paths.
+                    if newMode.isConnectMode {
+                        controller.settings.runtimeBaseURL = newMode.defaultBaseURL
+                        controller.refreshAvailableModels()
+                    }
+                }
+
+                if controller.settings.modelProviderMode.isConnectMode {
+                    TextField("Base URL", text: baseURLBinding())
+                    HStack {
+                        Button("Detect Models") { controller.refreshAvailableModels() }
+                        Spacer()
+                        Text(controller.modelDetectionStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    modelField(title: "Planner model", selection: $controller.settings.plannerModel, forGuard: false)
+                    modelField(title: "Guard model", selection: $controller.settings.guardModel, forGuard: true)
+                } else if controller.settings.modelProviderMode == .managedRuntime {
+                    TextField("Runtime executable", text: urlBinding(\.runtimeExecutableURL))
+                    TextField("Planner model file", text: urlBinding(\.plannerModelURL))
+                    TextField("Guard model file", text: urlBinding(\.guardModelURL))
+                    TextField("Planner model", text: $controller.settings.plannerModel)
+                    TextField("Guard model", text: $controller.settings.guardModel)
+                    TextField("Host", text: $controller.settings.runtimeHost)
+                    Stepper("Port: \(controller.settings.runtimePort)", value: $controller.settings.runtimePort, in: 1024...65535, step: 1)
+                    TextField("Launch arguments", text: stringListBinding(\.runtimeLaunchArguments))
+                    TextField("Health path", text: $controller.settings.runtimeHealthPath)
+                    TextField("Completion path", text: $controller.settings.runtimeCompletionsPath)
+                } else {
+                    Text("The built-in provider runs a scripted planner/guard with no network — useful for a guarded smoke run without a model server.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Toggle("Unload models after each run", isOn: $controller.settings.unloadModelsAfterRun)
                 Toggle("Use guard model", isOn: $controller.settings.useGuardModel)
-                Toggle("Dry-run execution only", isOn: $controller.settings.dryRunExecutionOnly)
+                Toggle("Dry-run execution only (validate, don't control)", isOn: $controller.settings.dryRunExecutionOnly)
+                Toggle("Send screenshots to a vision model (JPEG)", isOn: $controller.settings.sendScreenshots)
                 HStack {
                     Button("Test Connection") {
                         controller.testModelRuntimeConnection()
@@ -265,6 +285,48 @@ private struct SettingsPanelView: View {
         .formStyle(.grouped)
         .padding(24)
         .navigationTitle("Settings")
+    }
+
+    /// A model field that becomes a pick-list once the server's models are
+    /// detected, and stays a free-text field otherwise.
+    @ViewBuilder
+    private func modelField(title: String, selection: Binding<String>, forGuard: Bool) -> some View {
+        if controller.detectedModels.isEmpty {
+            TextField(title, text: selection)
+        } else {
+            Picker(title, selection: Binding(
+                get: { selection.wrappedValue },
+                set: { newValue in
+                    if let model = controller.detectedModels.first(where: { $0.id == newValue }) {
+                        controller.selectDetectedModel(model, forGuard: forGuard)
+                    } else {
+                        selection.wrappedValue = newValue
+                    }
+                }
+            )) {
+                // Preserve a previously-typed value that isn't in the list.
+                if !selection.wrappedValue.isEmpty,
+                   !controller.detectedModels.contains(where: { $0.id == selection.wrappedValue }) {
+                    Text(selection.wrappedValue).tag(selection.wrappedValue)
+                }
+                ForEach(controller.detectedModels) { model in
+                    Text(model.contextLength.map { "\(model.id) — ctx \($0)" } ?? model.id)
+                        .tag(model.id)
+                }
+            }
+        }
+    }
+
+    private func baseURLBinding() -> Binding<String> {
+        Binding(
+            get: { controller.settings.runtimeBaseURL.absoluteString },
+            set: { value in
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let url = URL(string: trimmed), !trimmed.isEmpty {
+                    controller.settings.runtimeBaseURL = url
+                }
+            }
+        )
     }
 
     private func urlBinding(_ keyPath: WritableKeyPath<AppSettings, URL>) -> Binding<String> {

@@ -33,13 +33,17 @@ public struct JSONActionPlanner: Sendable {
     }
 
     public func proposeOneAction(originalTask: String, context: AgentContext, recentMessages: [ChatMessage]) async throws -> StructuredAction {
-        let response = try await provider.complete(
+        let format: ModelResponseFormat = structuredOutput
+            ? .jsonSchema(name: "localpilot_action", schema: StructuredOutputSchema.action)
+            : .json
+        return try await decodeWithRetry(
             prompt: plannerPrompt(originalTask: originalTask, context: context, recentMessages: recentMessages),
             system: Self.systemPrompt,
-            format: structuredOutput ? .jsonSchema(name: "localpilot_action", schema: StructuredOutputSchema.action) : .json
-        )
-        let data = Data(response.utf8)
-        return try decoder.decode(StructuredAction.self, from: data)
+            format: format,
+            images: context.screenshotJPEGBase64.map { [$0] }
+        ) { text in
+            try decoder.decode(StructuredAction.self, from: Data(JSONExtraction.extract(text).utf8))
+        }
     }
 
     /// Propose an ordered plan of up to `maxActions` actions. The model may
@@ -51,20 +55,16 @@ public struct JSONActionPlanner: Sendable {
         recentMessages: [ChatMessage],
         maxActions: Int = 6
     ) async throws -> [StructuredAction] {
-        let response = try await provider.complete(
+        let format: ModelResponseFormat = structuredOutput
+            ? .jsonSchema(name: "localpilot_plan", schema: StructuredOutputSchema.plan)
+            : .json
+        let actions = try await decodeWithRetry(
             prompt: plannerPrompt(originalTask: originalTask, context: context, recentMessages: recentMessages),
             system: Self.planSystemPrompt,
-            format: structuredOutput ? .jsonSchema(name: "localpilot_plan", schema: StructuredOutputSchema.plan) : .json
-        )
-        let data = Data(response.utf8)
-
-        let actions: [StructuredAction]
-        if let plan = try? decoder.decode(ActionPlan.self, from: data) {
-            actions = plan.actions
-        } else {
-            // Fall back to a single action object for models that ignore the
-            // plan envelope; this also keeps small models working.
-            actions = [try decoder.decode(StructuredAction.self, from: data)]
+            format: format,
+            images: context.screenshotJPEGBase64.map { [$0] }
+        ) { text in
+            try Self.parsePlan(text, decoder: decoder)
         }
 
         let bounded = Array(actions.prefix(max(1, maxActions)))
@@ -74,26 +74,90 @@ public struct JSONActionPlanner: Sendable {
         return bounded
     }
 
-    private func plannerPrompt(originalTask: String, context: AgentContext, recentMessages: [ChatMessage]) -> String {
-        """
-        Original task:
-        \(originalTask)
+    /// Complete and decode. Local models often wrap JSON in code fences or add
+    /// prose, so decoding runs through `JSONExtraction`. On the first decode
+    /// failure we retry exactly once with a schema-correction prompt (Milestone
+    /// 5); if the retry still fails, the decode error propagates so the caller
+    /// fails safely.
+    private func decodeWithRetry<T>(
+        prompt: String,
+        system: String,
+        format: ModelResponseFormat,
+        images: [String]?,
+        decode: (String) throws -> T
+    ) async throws -> T {
+        let first = try await provider.complete(prompt: prompt, system: system, format: format, images: images)
+        if let value = try? decode(first) {
+            return value
+        }
+        let retry = try await provider.complete(
+            prompt: prompt + "\n\n" + Self.correctionSuffix,
+            system: system,
+            format: format,
+            images: images
+        )
+        return try decode(retry)
+    }
 
+    private static func parsePlan(_ text: String, decoder: JSONDecoder) throws -> [StructuredAction] {
+        let data = Data(JSONExtraction.extract(text).utf8)
+        if let plan = try? decoder.decode(ActionPlan.self, from: data) {
+            return plan.actions
+        }
+        // Fall back to a single action object for models that ignore the plan
+        // envelope; this keeps small models working.
+        return [try decoder.decode(StructuredAction.self, from: data)]
+    }
+
+    private func plannerPrompt(originalTask: String, context: AgentContext, recentMessages: [ChatMessage]) -> String {
+        var sections: [String] = ["Original task:\n\(originalTask)"]
+
+        let conversation = recentMessages.suffix(6).map { "\($0.role.rawValue): \($0.text)" }
+        if !conversation.isEmpty {
+            sections.append("Recent conversation:\n" + conversation.joined(separator: "\n"))
+        }
+
+        var scope: [String] = []
+        if !context.allowedDomains.isEmpty { scope.append("allowed_domains=" + context.allowedDomains.sorted().joined(separator: ", ")) }
+        if !context.allowedApps.isEmpty { scope.append("allowed_apps=" + context.allowedApps.sorted().joined(separator: ", ")) }
+        if !context.allowedFolders.isEmpty { scope.append("allowed_folders=" + context.allowedFolders.sorted().joined(separator: ", ")) }
+        if !scope.isEmpty { sections.append("Permission scope (never exceed):\n" + scope.joined(separator: "\n")) }
+
+        if !context.deniedActionSummaries.isEmpty {
+            sections.append("Already denied this run (do not repeat):\n" + context.deniedActionSummaries.joined(separator: "\n"))
+        }
+
+        sections.append("""
         Current context:
         active_app=\(context.activeApp ?? "unknown")
         active_window=\(context.activeWindow ?? "unknown")
         current_domain=\(context.currentDomain ?? "none")
         visible_text=\(context.visibleText)
+        """)
 
-        When the visible_text lists numbered "elements: [n] role \"label\"",
-        prefer targeting one of them by setting "target_element_id" to that
-        number for click, double_click, and type_text_safe actions, instead of
-        guessing raw "coordinates". Only fall back to coordinates when no listed
-        element matches.
+        sections.append("""
+        When visible_text lists numbered elements ("elements: [n] role \"label\""),
+        target one by setting "target_element_id" to that number for click,
+        double_click, type_text_safe, and move_cursor actions instead of guessing
+        raw "coordinates". Only use coordinates when no listed element matches.
+        To do several tightly-coupled steps at once (for example, click a text
+        field then type into it), return a single {"type":"batch", ...,
+        "actions":[ ... ]} action; every sub-action is still validated individually.
+        Return JSON only that matches the LocalPilot action schema.
+        """)
 
-        Return exactly one JSON object matching the LocalPilot action schema.
-        """
+        if context.screenshotJPEGBase64 != nil {
+            sections.append("A screenshot of the current screen is attached; use it to locate elements.")
+        }
+
+        return sections.joined(separator: "\n\n")
     }
+
+    private static let correctionSuffix = """
+    Your previous reply could not be parsed as valid JSON for the required schema.
+    Return ONLY a single JSON object matching the schema — no markdown, no code
+    fences, no commentary.
+    """
 
     private static let systemPrompt = """
     You are the LocalPilot planner. You may propose exactly one structured action and no batches.
@@ -105,12 +169,46 @@ public struct JSONActionPlanner: Sendable {
     You are the LocalPilot planner. Return JSON only, no markdown.
     Propose the next step or a short ordered plan of up to 6 steps as
     {"actions":[ ... ]}, where each item is a structured action. A single action
-    object is also accepted. Only chain steps you are confident about; the app
-    re-checks the screen and re-validates every action, and will stop early if a
-    step does not match the new screen state. Prefer observe, wait, ask_user, or
-    finish when uncertain. The model never controls the OS directly; it only
-    proposes actions, and every action passes policy and guard review.
+    object is also accepted. For tightly-coupled steps that should run without
+    re-observing in between (e.g. click a field then type), use one batch action:
+    {"type":"batch", "actions":[ ... ]}. Action types include observe, move_cursor,
+    click, double_click, type_text_safe, press_key, scroll, copy, paste, open_url,
+    run_terminal_command, switch_app, batch, wait, finish, ask_user.
+    Only chain steps you are confident about; the app re-checks the screen and
+    re-validates every action, and will stop early if a step does not match the
+    new screen state. Prefer observe, wait, ask_user, or finish when uncertain.
+    The model never controls the OS directly; it only proposes actions, and every
+    action passes policy and guard review.
     """
+}
+
+/// Recovers a JSON object/array from a model reply that may be wrapped in
+/// markdown code fences or surrounded by prose — common with small local models.
+public enum JSONExtraction {
+    public static func extract(_ raw: String) -> String {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Strip a leading ```json / ``` fence and its closing ``` if present.
+        if text.hasPrefix("```") {
+            if let firstNewline = text.firstIndex(of: "\n") {
+                text = String(text[text.index(after: firstNewline)...])
+            }
+            if let closingFence = text.range(of: "```", options: .backwards) {
+                text = String(text[..<closingFence.lowerBound])
+            }
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        // If prose surrounds the JSON, slice from the first opening bracket to the
+        // last matching closing bracket.
+        if let firstBrace = text.firstIndex(where: { $0 == "{" || $0 == "[" }) {
+            let closing: Character = text[firstBrace] == "{" ? "}" : "]"
+            if let lastBrace = text.lastIndex(of: closing), lastBrace > firstBrace {
+                return String(text[firstBrace...lastBrace])
+            }
+        }
+        return text
+    }
 }
 
 public enum PlannerError: LocalizedError, Sendable {

@@ -2,14 +2,63 @@ import Foundation
 
 public enum ModelProviderMode: String, Codable, CaseIterable, Identifiable, Sendable {
     case internalInProcess = "internal_in_process"
+    case ollama
+    case lmStudio = "lm_studio"
+    case openAICompatible = "openai_compatible"
     case managedRuntime = "managed_runtime"
 
     public var id: String { rawValue }
 
     public var displayName: String {
         switch self {
-        case .internalInProcess: "Internal in-process"
-        case .managedRuntime: "Managed runtime"
+        case .internalInProcess: "Internal (built-in)"
+        case .ollama: "Ollama"
+        case .lmStudio: "LM Studio"
+        case .openAICompatible: "OpenAI-compatible"
+        case .managedRuntime: "Managed runtime (self-hosted)"
+        }
+    }
+
+    /// Connect modes talk to an already-running local server at a base URL and
+    /// never launch a process.
+    public var isConnectMode: Bool {
+        switch self {
+        case .ollama, .lmStudio, .openAICompatible: true
+        case .internalInProcess, .managedRuntime: false
+        }
+    }
+
+    /// The wire protocol the backend speaks.
+    public var apiShape: APIShape {
+        switch self {
+        case .lmStudio, .openAICompatible: .openAIChat
+        case .ollama, .managedRuntime, .internalInProcess: .ollamaGenerate
+        }
+    }
+
+    /// Default endpoint for connect modes, applied as a preset when the user
+    /// picks the backend.
+    public var defaultBaseURL: URL {
+        switch self {
+        case .lmStudio, .openAICompatible: URL(string: "http://localhost:1234")!
+        default: URL(string: "http://localhost:11434")!
+        }
+    }
+
+    public var defaultCompletionsPath: String {
+        switch self {
+        case .ollama: "/api/generate"
+        case .lmStudio, .openAICompatible: "/v1/chat/completions"
+        default: "/v1/localpilot/complete"
+        }
+    }
+
+    /// A liveness path that returns 200 when the server is up.
+    public var defaultHealthPath: String {
+        switch self {
+        case .ollama: "/"
+        case .lmStudio, .openAICompatible: "/v1/models"
+        default: "/health"
         }
     }
 }
@@ -31,6 +80,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var runtimeEnvironment: [String: String]
     public var runtimeHealthPath: String
     public var runtimeCompletionsPath: String
+    /// Base URL of an already-running local server (Ollama/LM Studio/OpenAI-
+    /// compatible). Used by connect modes; ignored by the self-spawned runner.
+    public var runtimeBaseURL: URL
     public var plannerModel: String
     public var guardModel: String
     public var contextWindowSize: Int
@@ -40,6 +92,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var useGuardModel: Bool
     public var dryRunExecutionOnly: Bool
     public var useStructuredDecoding: Bool
+    /// When on, a downscaled JPEG of the screen is sent to the planner each step.
+    /// Requires a vision-capable model; off by default so text-only models work.
+    public var sendScreenshots: Bool
     public var allowedDomains: [String]
     public var allowedApps: [String]
     public var allowedFolders: [String]
@@ -55,15 +110,17 @@ public struct AppSettings: Codable, Equatable, Sendable {
         runtimeEnvironment: [:],
         runtimeHealthPath: "/health",
         runtimeCompletionsPath: "/v1/localpilot/complete",
-        plannerModel: "planner.gguf",
-        guardModel: "guard.gguf",
-        contextWindowSize: Self.maximumContextWindowSize,
+        runtimeBaseURL: URL(string: "http://localhost:11434")!,
+        plannerModel: "",
+        guardModel: "",
+        contextWindowSize: 8192,
         temperature: 0.1,
         timeoutSeconds: 60,
         unloadModelsAfterRun: true,
         useGuardModel: true,
         dryRunExecutionOnly: true,
         useStructuredDecoding: true,
+        sendScreenshots: false,
         allowedDomains: [],
         allowedApps: [],
         allowedFolders: []
@@ -100,7 +157,24 @@ public struct AppSettings: Codable, Equatable, Sendable {
     }
 
     private func runtimeConfiguration(modelURL: URL) -> ManagedModelRuntimeConfiguration {
-        ManagedModelRuntimeConfiguration(
+        if modelProviderMode.isConnectMode {
+            // Connect to a running server at the base URL. Paths are canonical
+            // for the chosen protocol (the user only needs to set the base URL),
+            // and no executable is launched.
+            return ManagedModelRuntimeConfiguration(
+                executableURL: runtimeExecutableURL,
+                modelURL: modelURL,
+                host: runtimeHost,
+                port: runtimePort,
+                launchArguments: runtimeLaunchArguments,
+                environment: runtimeEnvironment,
+                healthPath: modelProviderMode.defaultHealthPath,
+                completionsPath: modelProviderMode.defaultCompletionsPath,
+                baseURL: runtimeBaseURL,
+                apiShape: modelProviderMode.apiShape
+            )
+        }
+        return ManagedModelRuntimeConfiguration(
             executableURL: runtimeExecutableURL,
             modelURL: modelURL,
             host: runtimeHost,
@@ -108,7 +182,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
             launchArguments: runtimeLaunchArguments,
             environment: runtimeEnvironment,
             healthPath: runtimeHealthPath,
-            completionsPath: runtimeCompletionsPath
+            completionsPath: runtimeCompletionsPath,
+            baseURL: nil,
+            apiShape: modelProviderMode.apiShape
         )
     }
 
@@ -137,6 +213,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case runtimeEnvironment
         case runtimeHealthPath
         case runtimeCompletionsPath
+        case runtimeBaseURL
         case plannerModel
         case guardModel
         case contextWindowSize
@@ -146,6 +223,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case useGuardModel
         case dryRunExecutionOnly
         case useStructuredDecoding
+        case sendScreenshots
         case allowedDomains
         case allowedApps
         case allowedFolders
@@ -162,6 +240,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         runtimeEnvironment: [String: String],
         runtimeHealthPath: String,
         runtimeCompletionsPath: String,
+        runtimeBaseURL: URL,
         plannerModel: String,
         guardModel: String,
         contextWindowSize: Int,
@@ -171,6 +250,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         useGuardModel: Bool,
         dryRunExecutionOnly: Bool,
         useStructuredDecoding: Bool,
+        sendScreenshots: Bool,
         allowedDomains: [String],
         allowedApps: [String],
         allowedFolders: [String]
@@ -185,6 +265,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.runtimeEnvironment = runtimeEnvironment
         self.runtimeHealthPath = runtimeHealthPath
         self.runtimeCompletionsPath = runtimeCompletionsPath
+        self.runtimeBaseURL = runtimeBaseURL
         self.plannerModel = plannerModel
         self.guardModel = guardModel
         self.contextWindowSize = contextWindowSize
@@ -194,6 +275,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.useGuardModel = useGuardModel
         self.dryRunExecutionOnly = dryRunExecutionOnly
         self.useStructuredDecoding = useStructuredDecoding
+        self.sendScreenshots = sendScreenshots
         self.allowedDomains = allowedDomains
         self.allowedApps = allowedApps
         self.allowedFolders = allowedFolders
@@ -212,6 +294,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         runtimeEnvironment = try container.decodeIfPresent([String: String].self, forKey: .runtimeEnvironment) ?? defaults.runtimeEnvironment
         runtimeHealthPath = try container.decodeIfPresent(String.self, forKey: .runtimeHealthPath) ?? defaults.runtimeHealthPath
         runtimeCompletionsPath = try container.decodeIfPresent(String.self, forKey: .runtimeCompletionsPath) ?? defaults.runtimeCompletionsPath
+        runtimeBaseURL = try container.decodeIfPresent(URL.self, forKey: .runtimeBaseURL) ?? defaults.runtimeBaseURL
         plannerModel = try container.decodeIfPresent(String.self, forKey: .plannerModel) ?? defaults.plannerModel
         guardModel = try container.decodeIfPresent(String.self, forKey: .guardModel) ?? defaults.guardModel
         contextWindowSize = try container.decodeIfPresent(Int.self, forKey: .contextWindowSize) ?? defaults.contextWindowSize
@@ -221,6 +304,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         useGuardModel = try container.decodeIfPresent(Bool.self, forKey: .useGuardModel) ?? defaults.useGuardModel
         dryRunExecutionOnly = try container.decodeIfPresent(Bool.self, forKey: .dryRunExecutionOnly) ?? defaults.dryRunExecutionOnly
         useStructuredDecoding = try container.decodeIfPresent(Bool.self, forKey: .useStructuredDecoding) ?? defaults.useStructuredDecoding
+        sendScreenshots = try container.decodeIfPresent(Bool.self, forKey: .sendScreenshots) ?? defaults.sendScreenshots
         allowedDomains = try container.decodeIfPresent([String].self, forKey: .allowedDomains) ?? defaults.allowedDomains
         allowedApps = try container.decodeIfPresent([String].self, forKey: .allowedApps) ?? defaults.allowedApps
         allowedFolders = try container.decodeIfPresent([String].self, forKey: .allowedFolders) ?? defaults.allowedFolders
@@ -231,6 +315,9 @@ private extension ModelProviderMode {
     var providerName: String {
         switch self {
         case .internalInProcess: "internal-in-process"
+        case .ollama: "ollama"
+        case .lmStudio: "lm-studio"
+        case .openAICompatible: "openai-compatible"
         case .managedRuntime: "managed-local"
         }
     }

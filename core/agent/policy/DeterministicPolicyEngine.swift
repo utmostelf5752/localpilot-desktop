@@ -19,16 +19,21 @@ public struct DeterministicPolicyEngine: Sendable {
         "mv ", "cp /", "> /", ">>", ">|",
         "$(", "`", "base64", "xxd", "openssl", "gpg ",
         "python -c", "python3 -c", "perl -e", "perl -n",
-        "ruby -e", "node -e", "bash -c", "sh -c", "zsh -c", "awk ",
-        "tee ", "xargs", "find ", "-exec", "-delete",
+        "ruby -e", "node -e", "bash -c", "sh -c", "zsh -c",
+        "-exec", "-delete",
         "brew", "port install", "macports",
         "pip install", "pip3 install", "npm install", "npm i ",
         "yarn add", "pnpm add", "gem install", "cargo install",
         "go install", "apt ", "apt-get", "yum ", "dnf ", "snap install",
-        "softwareupdate", "installer", "pkgutil", "open -a",
+        "softwareupdate", "installer", "pkgutil",
         "mail ", "sendmail", "smtp", "ifconfig", "iptables",
-        "pfctl", "route ", "arp ", "history", "set -", "export ", "env "
+        "pfctl", "route ", "arp "
     ]
+    // Previously these were hard-blocked, which wrongly refused safe commands
+    // (`find . -name x`, `export FOO=bar`, `history`, `open -a Notes`). The
+    // genuinely destructive variants are still caught: `find ... -exec`/`-delete`
+    // and `rm`/`mv`/redirections remain blocked, and anything not allowlisted
+    // still falls through to ask_user (recoverable) rather than auto-allow.
 
     // Shell metacharacters that chain or substitute commands. If any appear
     // in an otherwise "allowlisted" command, we cannot reason about the full
@@ -67,7 +72,9 @@ public struct DeterministicPolicyEngine: Sendable {
 
     public func classify(action: StructuredAction, context: AgentContext) -> PolicyDecision {
         switch action.type {
-        case .observe, .scroll, .wait, .finish, .askUser:
+        case .observe, .moveCursor, .scroll, .wait, .finish, .askUser:
+            // move_cursor only repositions the pointer; it performs no click and
+            // is as low-risk as observe/scroll.
             return .init(classification: .allow, reason: "Low-risk action is allowed.")
         case .typeTextSensitive:
             return .init(classification: .block, reason: "Personal information and sensitive typing are blocked in v1.")
@@ -85,11 +92,60 @@ public struct DeterministicPolicyEngine: Sendable {
             return .init(classification: .askUser, reason: "Pasting requires user approval unless generated safe text is proven.")
         case .copy:
             return .init(classification: .askUser, reason: "Clipboard access requires user approval by default.")
-        case .typeTextSafe, .pressKey, .switchApp:
+        case .switchApp:
+            return classifySwitchApp(action, context: context)
+        case .batch:
+            return classifyBatchAction(action, context: context)
+        case .typeTextSafe, .pressKey:
             return action.riskLevel == .low
                 ? .init(classification: .allow, reason: "Low-risk structured action is allowed.")
                 : .init(classification: .askUser, reason: "Medium or high risk action requires approval.")
         }
+    }
+
+    /// Classify a `batch` action as the worst of its sub-actions. The
+    /// orchestrator still re-runs the full policy + guard pipeline on each
+    /// sub-action before it executes; this combined verdict is the conservative
+    /// pre-check and the source of truth for the switch's exhaustiveness.
+    private func classifyBatchAction(_ action: StructuredAction, context: AgentContext) -> PolicyDecision {
+        guard let subs = action.actions, !subs.isEmpty else {
+            return .init(classification: .block, reason: "Batch contains no sub-actions.")
+        }
+        if subs.contains(where: { $0.type == .batch }) {
+            return .init(classification: .block, reason: "Nested batches are not allowed.")
+        }
+        var worst: PolicyClassification = .allow
+        for sub in subs {
+            let decision = classify(action: sub, context: context)
+            switch decision.classification {
+            case .block:
+                return .init(classification: .block, reason: "Batch blocked at \(sub.type.rawValue): \(decision.reason)")
+            case .askUser:
+                worst = .askUser
+            case .allow:
+                break
+            }
+        }
+        return worst == .askUser
+            ? .init(classification: .askUser, reason: "Batch contains an action that requires approval.")
+            : .init(classification: .allow, reason: "All batch sub-actions are low-risk and allowed.")
+    }
+
+    /// Switching apps is classified against the task's app allowlist rather than
+    /// the planner-supplied (untrusted) risk level. With no allowlist set, app
+    /// switching is treated as low-risk and allowed.
+    private func classifySwitchApp(_ action: StructuredAction, context: AgentContext) -> PolicyDecision {
+        let appName = (action.text ?? action.targetText).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !appName.isEmpty else {
+            return .init(classification: .block, reason: "Switch app blocked: app name is missing.")
+        }
+        guard !context.allowedApps.isEmpty else {
+            return .init(classification: .allow, reason: "App switching is allowed (no app allowlist set).")
+        }
+        let allowed = context.allowedApps.contains { $0.lowercased() == appName }
+        return allowed
+            ? .init(classification: .allow, reason: "App is in the task allowlist.")
+            : .init(classification: .askUser, reason: "App is not in the allowlist and requires approval.")
     }
 
     private func classifyTerminalCommand(_ command: String?) -> PolicyDecision {
@@ -175,7 +231,15 @@ public struct DeterministicPolicyEngine: Sendable {
 
     private func classifyClick(_ action: StructuredAction) -> PolicyDecision {
         let target = action.targetText.lowercased()
-        if riskyClickTerms.contains(where: { target.contains($0) }) {
+        // Tokenize on non-alphanumerics so a single-word risk term must match a
+        // whole word, not a substring. This stops false positives like "Posts"
+        // (post), "Postal code", or "Runner up" (run) from forcing an approval
+        // popup, while multi-word phrases still match as substrings.
+        let tokens = Set(target.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init))
+        let isRisky = riskyClickTerms.contains { term in
+            term.contains(" ") ? target.contains(term) : tokens.contains(term)
+        }
+        if isRisky {
             return .init(classification: .askUser, reason: "Risky click target requires approval.")
         }
 

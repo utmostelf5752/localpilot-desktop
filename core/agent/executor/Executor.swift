@@ -8,9 +8,14 @@ public protocol ActionExecutor: Sendable {
     func execute(_ action: StructuredAction) async -> String
     func stopImmediately() async
     func setPaused(_ paused: Bool) async
+    /// Set whether execution is dry-run (validate only) or performs real OS
+    /// control. A required member (not a defaulted one) so the witness is always
+    /// the conformer's own implementation.
+    func setDryRun(_ dryRun: Bool) async
 }
 
 public protocol ComputerControlling: Sendable {
+    func move(to point: CGPoint) async
     func click(at point: CGPoint) async
     func doubleClick(at point: CGPoint) async
     func typeText(_ text: String) async
@@ -25,6 +30,10 @@ public protocol ComputerControlling: Sendable {
 
 public actor QuartzComputerController: ComputerControlling {
     public init() {}
+
+    public func move(to point: CGPoint) {
+        postMouse(.mouseMoved, at: point)
+    }
 
     public func click(at point: CGPoint) {
         postMouse(.mouseMoved, at: point)
@@ -190,7 +199,7 @@ public actor QuartzComputerController: ComputerControlling {
 public actor LocalPilotActionExecutor: ActionExecutor {
     private let screenObserver: any ScreenObserving
     private let computerController: any ComputerControlling
-    private let dryRun: Bool
+    private var dryRun: Bool
     private var enabled = true
     private var paused = false
 
@@ -201,6 +210,10 @@ public actor LocalPilotActionExecutor: ActionExecutor {
     ) {
         self.screenObserver = screenObserver
         self.computerController = computerController
+        self.dryRun = dryRun
+    }
+
+    public func setDryRun(_ dryRun: Bool) {
         self.dryRun = dryRun
     }
 
@@ -219,6 +232,24 @@ public actor LocalPilotActionExecutor: ActionExecutor {
             return "Task marked finished."
         case .askUser:
             return "Asked user for input."
+        case .batch:
+            // A batch is expanded and gated action-by-action by the orchestrator;
+            // it must never be executed as an opaque unit here.
+            return "Batch is expanded by the orchestrator and not executed directly."
+        case .moveCursor:
+            guard !dryRun else { return dryRunResult(for: action) }
+            let point: CGPoint
+            if let elementID = action.targetElementID {
+                switch await resolveElement(id: elementID) {
+                case .resolved(let resolved): point = resolved
+                case .notFound(let message): return message
+                }
+            } else {
+                guard let coordinatePoint = action.point else { return "Move blocked: coordinates are missing." }
+                point = coordinatePoint
+            }
+            await computerController.move(to: point)
+            return "Moved cursor to \(Int(point.x)),\(Int(point.y))."
         case .click:
             guard !dryRun else { return dryRunResult(for: action) }
             let point: CGPoint
@@ -317,8 +348,14 @@ public actor LocalPilotActionExecutor: ActionExecutor {
     }
 
     public func setPaused(_ paused: Bool) {
+        // Pause is a soft interrupt: it sets the paused flag but leaves the
+        // executor "enabled", so execute() reports "Executor paused." rather than
+        // the hard-stop "Executor disabled.". Unpausing also re-enables, which is
+        // what lets a fresh run recover after a prior hard Stop disabled it.
         self.paused = paused
-        enabled = !paused
+        if !paused {
+            enabled = true
+        }
     }
 
     private func dryRunResult(for action: StructuredAction) -> String {
@@ -382,6 +419,9 @@ public actor StubActionExecutor: ActionExecutor {
             enabled = true
         }
     }
+
+    // The stub never performs OS control, so dry-run state is a no-op here.
+    public func setDryRun(_ dryRun: Bool) {}
 }
 
 private extension StructuredAction {

@@ -132,6 +132,15 @@ public struct ScreenObservation: Codable, Equatable, Sendable {
 
 public protocol ScreenObserving: Sendable {
     @MainActor func capture() async -> ScreenObservation
+    /// Capture a downscaled, JPEG-compressed snapshot of the main display as a
+    /// base64 string, for sending to a vision-capable local model. Defaulted to
+    /// `nil` so text-only observers and test doubles opt out at zero cost; only
+    /// `LiveScreenObserver` produces a real image, and only when the caller asks.
+    @MainActor func captureScreenshotJPEG() async -> String?
+}
+
+public extension ScreenObserving {
+    @MainActor func captureScreenshotJPEG() async -> String? { nil }
 }
 
 public struct LiveScreenObserver: ScreenObserving {
@@ -141,17 +150,73 @@ public struct LiveScreenObserver: ScreenObserving {
     public func capture() async -> ScreenObservation {
         let activeApp = NSWorkspace.shared.frontmostApplication?.localizedName
         let activeWindow = Self.frontmostWindowTitle(for: activeApp)
-        let screenshot = Self.captureMainDisplayPNG()
+        // Only read the display dimensions here. We deliberately do NOT capture or
+        // base64-encode the framebuffer on every observation: the text summary
+        // needs only the resolution, and eagerly encoding a full-display image
+        // each loop step was pure CPU/memory waste. The actual image is produced
+        // on demand by `captureScreenshotJPEG()` when vision is enabled.
+        let (width, height) = Self.mainDisplayDimensions()
 
         return ScreenObservation(
             activeApp: activeApp,
             activeWindow: activeWindow,
-            screenshotWidth: screenshot.width,
-            screenshotHeight: screenshot.height,
-            screenshotPNGBase64: screenshot.pngBase64,
+            screenshotWidth: width,
+            screenshotHeight: height,
+            screenshotPNGBase64: nil,
             accessibilitySummary: Self.accessibilitySummary(),
             elements: Self.collectActionableElements()
         )
+    }
+
+    /// Downscale (long side ≤ 1280px) and JPEG-compress (quality 0.5) the main
+    /// display, returned as base64. Downscaling + JPEG keeps the payload small so
+    /// it does not blow a local model's context/token budget.
+    @MainActor
+    public func captureScreenshotJPEG() async -> String? {
+        guard let image = CGDisplayCreateImage(CGMainDisplayID()) else { return nil }
+        return Self.encodeJPEGBase64(image, maxDimension: 1280, quality: 0.5)
+    }
+
+    private static func mainDisplayDimensions() -> (width: Int?, height: Int?) {
+        let displayID = CGMainDisplayID()
+        let width = CGDisplayPixelsWide(displayID)
+        let height = CGDisplayPixelsHigh(displayID)
+        guard width > 0, height > 0 else { return (nil, nil) }
+        return (width, height)
+    }
+
+    private static func encodeJPEGBase64(_ image: CGImage, maxDimension: Int, quality: Double) -> String? {
+        let srcWidth = CGFloat(image.width)
+        let srcHeight = CGFloat(image.height)
+        guard srcWidth > 0, srcHeight > 0 else { return nil }
+
+        let scale = min(1, CGFloat(maxDimension) / max(srcWidth, srcHeight))
+        let targetWidth = max(1, Int(srcWidth * scale))
+        let targetHeight = max(1, Int(srcHeight * scale))
+
+        let cgImageToEncode: CGImage
+        if scale < 1,
+           let context = CGContext(
+               data: nil,
+               width: targetWidth,
+               height: targetHeight,
+               bitsPerComponent: 8,
+               bytesPerRow: 0,
+               space: CGColorSpaceCreateDeviceRGB(),
+               bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+           ) {
+            context.interpolationQuality = .medium
+            context.draw(image, in: CGRect(x: 0, y: 0, width: targetWidth, height: targetHeight))
+            cgImageToEncode = context.makeImage() ?? image
+        } else {
+            cgImageToEncode = image
+        }
+
+        let bitmap = NSBitmapImageRep(cgImage: cgImageToEncode)
+        guard let data = bitmap.representation(using: .jpeg, properties: [.compressionFactor: quality]) else {
+            return nil
+        }
+        return data.base64EncodedString()
     }
 
     private static func frontmostWindowTitle(for activeApp: String?) -> String? {
@@ -164,18 +229,6 @@ public struct LiveScreenObserver: ScreenObserving {
             guard let activeApp else { return true }
             return owner == activeApp
         }?[kCGWindowName as String] as? String
-    }
-
-    private static func captureMainDisplayPNG() -> (width: Int?, height: Int?, pngBase64: String?) {
-        guard let image = CGDisplayCreateImage(CGMainDisplayID()) else {
-            return (nil, nil, nil)
-        }
-
-        let width = image.width
-        let height = image.height
-        let bitmap = NSBitmapImageRep(cgImage: image)
-        let data = bitmap.representation(using: .png, properties: [:])
-        return (width, height, data?.base64EncodedString())
     }
 
     private static func accessibilitySummary() -> String? {
@@ -211,7 +264,10 @@ public struct LiveScreenObserver: ScreenObserving {
             .joined(separator: " ")
 
         if !label.isEmpty {
-            items.append(label)
+            // Cap each item so a single long AXValue (e.g. a whole paragraph of
+            // text) cannot dominate the planner context once num_ctx is realistic.
+            let capped = label.count > 80 ? String(label.prefix(80)) + "…" : label
+            items.append(capped)
         }
 
         var childrenRef: CFTypeRef?
@@ -237,7 +293,7 @@ public struct LiveScreenObserver: ScreenObserving {
     /// the controls a planner would want to click or type into.
     private static let actionableRoles: Set<String> = [
         kAXButtonRole as String,
-        kAXLinkRole as String,
+        "AXLink",   // no kAXLinkRole constant exists in the SDK; AX link role value is "AXLink"
         kAXTextFieldRole as String,
         kAXTextAreaRole as String,
         kAXMenuItemRole as String,
@@ -373,8 +429,15 @@ public struct AgentContextBuilder: Sendable {
     /// Lean builder used by the agent loop. Builds a short, fresh context from
     /// the task line, the rolling history summary, the raw recent-step tail, and
     /// ONLY the latest observation. Images are latest-only and never accumulate.
+    /// When `settings.sendScreenshots` is on, a single downscaled JPEG of the
+    /// current screen is attached for vision-capable models.
     @MainActor
-    public func makeContext(settings: AppSettings, task: String, history: AgentHistory) async -> AgentContext {
+    public func makeContext(
+        settings: AppSettings,
+        task: String,
+        history: AgentHistory,
+        state: LocalPilotState? = nil
+    ) async -> AgentContext {
         let observation = await screenObserver.capture()
 
         var parts: [String] = ["Task: \(task)"]
@@ -387,10 +450,25 @@ public struct AgentContextBuilder: Sendable {
         parts.append("Latest observation: \(observation.summary)")
         let visibleText = parts.joined(separator: "\n")
 
-        return context(from: observation, settings: settings, visibleText: visibleText)
+        let image = settings.sendScreenshots ? await screenObserver.captureScreenshotJPEG() : nil
+        let denied = (state?.deniedActions ?? []).suffix(5).map { "\($0.type.rawValue): \($0.targetText)" }
+
+        return context(
+            from: observation,
+            settings: settings,
+            visibleText: visibleText,
+            image: image,
+            deniedActionSummaries: Array(denied)
+        )
     }
 
-    private func context(from observation: ScreenObservation, settings: AppSettings, visibleText: String) -> AgentContext {
+    private func context(
+        from observation: ScreenObservation,
+        settings: AppSettings,
+        visibleText: String,
+        image: String? = nil,
+        deniedActionSummaries: [String] = []
+    ) -> AgentContext {
         AgentContext(
             activeApp: observation.activeApp,
             activeWindow: observation.activeWindow,
@@ -399,7 +477,9 @@ public struct AgentContextBuilder: Sendable {
             allowedApps: Set(settings.allowedApps),
             allowedFolders: Set(settings.allowedFolders),
             visibleText: visibleText,
-            activeFieldKind: nil
+            activeFieldKind: nil,
+            screenshotJPEGBase64: image,
+            deniedActionSummaries: deniedActionSummaries
         )
     }
 }

@@ -50,11 +50,21 @@ public enum StructuredOutputSchema {
     }
 
     /// The action schema as a dictionary, reused inside the plan envelope.
+    /// Includes the `actions` array so a top-level action may itself be a batch.
     private static var actionSchemaObject: [String: Any] {
-        // Derive the `type` enum from the source of truth so it can never drift.
-        let actionTypes = ActionType.allCases.map(\.rawValue)
+        actionSchema(includeBatch: true)
+    }
 
-        let properties: [String: Any] = [
+    /// A single action's schema. `includeBatch` adds the `move_cursor`/`batch`
+    /// types and the `actions` sub-action array; sub-actions are emitted with
+    /// `includeBatch: false` so a batch can never nest another batch (bounded
+    /// recursion that small local models can follow).
+    private static func actionSchema(includeBatch: Bool) -> [String: Any] {
+        let actionTypes = includeBatch
+            ? ActionType.allCases.map(\.rawValue)
+            : ActionType.allCases.filter { $0 != .batch }.map(\.rawValue)
+
+        var properties: [String: Any] = [
             "type": [
                 "type": "string",
                 "enum": actionTypes
@@ -75,6 +85,15 @@ public enum StructuredOutputSchema {
             ],
             "reason": ["type": "string"]
         ]
+
+        if includeBatch {
+            properties["actions"] = [
+                "type": ["array", "null"],
+                "minItems": 1,
+                "maxItems": 6,
+                "items": actionSchema(includeBatch: false)
+            ]
+        }
 
         return [
             "type": "object",

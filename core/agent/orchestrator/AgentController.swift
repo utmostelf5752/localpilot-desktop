@@ -20,18 +20,24 @@ public final class AgentController {
     public private(set) var settingsStatus = "Settings loaded"
     public private(set) var providerStatus = "Not connected"
     public private(set) var pendingApproval: PendingApproval?
+    /// Models advertised by the configured local server (Ollama/LM Studio),
+    /// surfaced as a pick-list in Settings instead of free-text entry.
+    public private(set) var detectedModels: [DetectedModel] = []
+    public private(set) var modelDetectionStatus = ""
 
     @ObservationIgnored private let logger: LocalEventLogger
     @ObservationIgnored private let settingsStore: SettingsStore
     @ObservationIgnored private let policyEngine = DeterministicPolicyEngine()
     @ObservationIgnored private let executor: any ActionExecutor
     @ObservationIgnored private let contextBuilder: AgentContextBuilder
+    @ObservationIgnored private let modelCatalog = ModelCatalogService()
     @ObservationIgnored private weak var modelSessionCloser: ModelSessionClosing?
     @ObservationIgnored private let useModelLoop: Bool
     @ObservationIgnored private var actionLoop: Task<Void, Never>?
     @ObservationIgnored private var activeTaskID: UUID?
     @ObservationIgnored private var approvalDecision: ApprovalDecision?
     @ObservationIgnored private var history = AgentHistory()
+    @ObservationIgnored private var executedActionsThisRun = 0
 
     public init(
         logger: LocalEventLogger = LocalEventLogger(),
@@ -142,6 +148,9 @@ public final class AgentController {
 
     public func approvePendingAction() {
         approvalDecision = .allow
+        if let action = pendingApproval?.action {
+            state.userApprovals.append("\(action.type.rawValue): \(action.targetText)")
+        }
         pendingApproval = nil
         runStatus = .running
         overlayState = .running
@@ -180,37 +189,86 @@ public final class AgentController {
         let settings = settings
         providerStatus = settings.modelProviderMode == .internalInProcess
             ? "Checking internal model..."
-            : "Checking local runtime..."
+            : "Checking \(settings.modelProviderMode.displayName)..."
         Task {
-            let provider = makePlannerProvider(settings: settings, runtime: ProcessManagedModelRuntime())
+            let provider = makePlannerProvider(settings: settings, runtime: makeRuntime(settings: settings))
             do {
                 try await provider.healthCheck()
                 try? await provider.closeModel()
                 await MainActor.run {
                     providerStatus = settings.modelProviderMode == .internalInProcess
                         ? "Internal model ready"
-                        : "Managed runtime connected"
+                        : "Connected to \(settings.modelProviderMode.displayName)"
                     appendLog(providerStatus)
                 }
             } catch {
                 await MainActor.run {
                     providerStatus = settings.modelProviderMode == .internalInProcess
                         ? "Internal model failed: \(error.localizedDescription)"
-                        : "Managed runtime failed: \(error.localizedDescription)"
+                        : "\(settings.modelProviderMode.displayName) failed: \(error.localizedDescription)"
                     appendLog(providerStatus)
                 }
             }
         }
     }
 
+    /// Query the configured server for its available models and, when possible,
+    /// the context window, so the UI can present a list rather than free-text.
+    public func refreshAvailableModels() {
+        let settings = settings
+        guard settings.modelProviderMode.isConnectMode else {
+            detectedModels = []
+            modelDetectionStatus = "Model detection is available for Ollama / LM Studio / OpenAI-compatible modes."
+            return
+        }
+        modelDetectionStatus = "Detecting models on \(settings.runtimeBaseURL.absoluteString)..."
+        let baseURL = settings.runtimeBaseURL
+        let shape = settings.modelProviderMode.apiShape
+        Task {
+            do {
+                let models = try await modelCatalog.listModels(baseURL: baseURL, apiShape: shape, timeoutSeconds: settings.timeoutSeconds)
+                await MainActor.run {
+                    detectedModels = models
+                    modelDetectionStatus = models.isEmpty
+                        ? "No models found. Is the server running and a model loaded?"
+                        : "Found \(models.count) model(s)."
+                }
+            } catch {
+                await MainActor.run {
+                    detectedModels = []
+                    modelDetectionStatus = "Model detection failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    /// Select a detected model for a role and, if the server reported its context
+    /// window, adopt it so `num_ctx` and the compaction budget match the model.
+    public func selectDetectedModel(_ model: DetectedModel, forGuard: Bool) {
+        if forGuard {
+            settings.guardModel = model.id
+        } else {
+            settings.plannerModel = model.id
+        }
+        if let context = model.contextLength, context > 0 {
+            settings.contextWindowSize = context
+        }
+    }
+
     private func runAgentLoop(task: String) async {
-        let runtime = ProcessManagedModelRuntime()
+        let runtime = makeRuntime(settings: settings)
         let plannerProvider = makePlannerProvider(settings: settings, runtime: runtime)
         let guardProvider = makeGuardProvider(settings: settings, runtime: runtime)
         if let manager = modelSessionCloser as? ModelSessionManager {
             manager.register(plannerProvider)
             manager.register(guardProvider)
         }
+
+        // Honor the persisted execution mode and re-enable the executor for this
+        // run (a prior Stop disabled it). Both must be set before any execute.
+        await executor.setPaused(false)
+        await executor.setDryRun(settings.dryRunExecutionOnly)
+        executedActionsThisRun = 0
 
         let planner = JSONActionPlanner(provider: plannerProvider, structuredOutput: settings.useStructuredDecoding)
         let compactor = ContextCompactor(config: ContextCompactionConfig(
@@ -226,7 +284,7 @@ public final class AgentController {
                 }
             }
         )
-        var context = await contextBuilder.makeContext(settings: settings, task: task, history: history)
+        var context = await contextBuilder.makeContext(settings: settings, task: task, history: history, state: state)
         state.lastObservationSummary = context.visibleText.components(separatedBy: "\n").last ?? ""
 
         do {
@@ -237,19 +295,18 @@ public final class AgentController {
             try await plannerProvider.healthCheck()
             providerStatus = settings.modelProviderMode == .internalInProcess
                 ? "Internal model ready"
-                : "Managed runtime connected"
+                : "Connected to \(settings.modelProviderMode.displayName)"
 
             let maxActions = 20
             let maxPlan = 6
-            var executedActions = 0
 
-            planningRounds: while executedActions < maxActions {
+            planningRounds: while executedActionsThisRun < maxActions {
                 guard !Task.isCancelled, runStatus == .running else { return }
                 await waitIfPaused()
                 guard runStatus == .running else { return }
 
                 currentActionLabel = "Observing screen"
-                context = await contextBuilder.makeContext(settings: settings, task: task, history: history)
+                context = await contextBuilder.makeContext(settings: settings, task: task, history: history, state: state)
                 state.lastObservationSummary = context.visibleText.components(separatedBy: "\n").last ?? ""
                 if compactor.shouldCompact(estimatedTokens: compactor.estimateTokens(context.visibleText)) {
                     log(event: "context_compacted", detail: "Context kept lean: rolling summary plus recent step tail.")
@@ -274,65 +331,42 @@ public final class AgentController {
                 // steps and abandon the rest of the plan to re-plan if a step
                 // fails or the screen no longer matches.
                 for (index, action) in plan.enumerated() {
-                    guard executedActions < maxActions else { break planningRounds }
+                    guard executedActionsThisRun < maxActions else { break planningRounds }
                     guard !Task.isCancelled, runStatus == .running else { return }
                     await waitIfPaused()
                     guard runStatus == .running else { return }
 
                     if index > 0 {
                         currentActionLabel = "Observing screen"
-                        context = await contextBuilder.makeContext(settings: settings, task: task, history: history)
+                        context = await contextBuilder.makeContext(settings: settings, task: task, history: history, state: state)
                         state.lastObservationSummary = context.visibleText.components(separatedBy: "\n").last ?? ""
                         log(event: "screen_observed", detail: state.lastObservationSummary)
                     }
 
-                    messages.append(ChatMessage(role: .agent, text: "Proposed `\(action.type.rawValue)`: \(action.expectedResult)"))
-                    currentActionLabel = "Policy check: \(action.type.rawValue)"
-
-                    let policy = policyEngine.classify(action: action, context: context)
-                    log(event: "policy_decision", detail: "\(policy.classification.rawValue): \(policy.reason)")
-
-                    switch policy.classification {
-                    case .block:
-                        blockTask(reason: policy.reason, action: action)
-                        return
-                    case .askUser:
-                        let allowed = await requestApproval(action: action, reason: policy.reason)
-                        guard allowed else { return }
-                    case .allow:
-                        break
-                    }
-
-                    if settings.useGuardModel {
-                        currentActionLabel = "Guard review"
-                        let guardDecision = await tieredGuard.decide(action: action, context: context, policyDecision: policy)
-                        log(event: "guard_decision", detail: "\(guardDecision.decision.rawValue): \(guardDecision.reason)")
-                        guard guardDecision.decision == .allow else {
-                            blockTask(reason: guardDecision.reason, action: action)
-                            return
+                    if action.type == .batch {
+                        // A batch runs its tightly-coupled sub-actions WITHOUT
+                        // re-observing between them, but each sub-action still
+                        // passes the full policy + guard + approval pipeline.
+                        let subs = action.actions ?? []
+                        guard !subs.isEmpty else {
+                            log(event: "plan_aborted", detail: "Empty batch; re-planning.")
+                            continue planningRounds
                         }
-                    }
-
-                    guard !Task.isCancelled, runStatus == .running else { return }
-
-                    executedActions += 1
-                    fakeCursorPosition = CGPoint(x: 260 + CGFloat(executedActions * 18), y: 220 + CGFloat(executedActions * 10))
-                    currentActionLabel = "Executing \(action.type.rawValue)"
-                    let result = await executor.execute(action)
-                    state.completedSteps.append(action.type.rawValue)
-                    state.lastActionResult = result
-                    history.record("\(action.type.rawValue): \(result)", compactor: compactor, maxRecent: 4)
-                    appendLog(result)
-                    log(event: "executor_result", detail: result)
-
-                    if action.type == .finish {
-                        completeTask(message: "Task finished by planner.")
-                        return
-                    }
-
-                    if Self.indicatesFailure(result) {
-                        log(event: "plan_aborted", detail: "Step result indicates failure; re-planning from fresh observation.")
-                        continue planningRounds
+                        log(event: "batch", detail: "Executing batch of \(subs.count) sub-actions; each is gated individually.")
+                        for sub in subs {
+                            guard executedActionsThisRun < maxActions else { break planningRounds }
+                            switch await runGatedAction(sub, context: context, tieredGuard: tieredGuard, compactor: compactor) {
+                            case .executed: continue
+                            case .finished, .halted: return
+                            case .replan: continue planningRounds
+                            }
+                        }
+                    } else {
+                        switch await runGatedAction(action, context: context, tieredGuard: tieredGuard, compactor: compactor) {
+                        case .executed: break
+                        case .finished, .halted: return
+                        case .replan: continue planningRounds
+                        }
                     }
                 }
             }
@@ -343,6 +377,77 @@ public final class AgentController {
         } catch {
             blockTask(reason: "Model loop failed: \(error.localizedDescription)", action: nil)
         }
+    }
+
+    private enum ActionStepResult {
+        case executed   // ran successfully; continue
+        case finished   // a finish action completed the task
+        case replan     // step failed or was denied-and-recoverable; re-plan
+        case halted     // terminal state already set (block/deny/stop); caller returns
+    }
+
+    /// Run a single (non-batch) action through the full safety pipeline:
+    /// pause/stop checks, deterministic policy, native approval, guard review,
+    /// then execution and state/history recording. Used for both plain actions
+    /// and each sub-action of a batch.
+    private func runGatedAction(
+        _ action: StructuredAction,
+        context: AgentContext,
+        tieredGuard: TieredGuard,
+        compactor: ContextCompactor
+    ) async -> ActionStepResult {
+        guard !Task.isCancelled, runStatus == .running else { return .halted }
+        await waitIfPaused()
+        guard runStatus == .running else { return .halted }
+
+        messages.append(ChatMessage(role: .agent, text: "Proposed `\(action.type.rawValue)`: \(action.expectedResult)"))
+        currentActionLabel = "Policy check: \(action.type.rawValue)"
+
+        let policy = policyEngine.classify(action: action, context: context)
+        log(event: "policy_decision", detail: "\(policy.classification.rawValue): \(policy.reason)")
+
+        switch policy.classification {
+        case .block:
+            blockTask(reason: policy.reason, action: action)
+            return .halted
+        case .askUser:
+            let allowed = await requestApproval(action: action, reason: policy.reason)
+            guard allowed else { return .halted }
+        case .allow:
+            break
+        }
+
+        if settings.useGuardModel {
+            currentActionLabel = "Guard review"
+            let guardDecision = await tieredGuard.decide(action: action, context: context, policyDecision: policy)
+            log(event: "guard_decision", detail: "\(guardDecision.decision.rawValue): \(guardDecision.reason)")
+            guard guardDecision.decision == .allow else {
+                blockTask(reason: guardDecision.reason, action: action)
+                return .halted
+            }
+        }
+
+        guard !Task.isCancelled, runStatus == .running else { return .halted }
+
+        executedActionsThisRun += 1
+        fakeCursorPosition = CGPoint(x: 260 + CGFloat(executedActionsThisRun * 18), y: 220 + CGFloat(executedActionsThisRun * 10))
+        currentActionLabel = "Executing \(action.type.rawValue)"
+        let result = await executor.execute(action)
+        state.completedSteps.append(action.type.rawValue)
+        state.lastActionResult = result
+        history.record("\(action.type.rawValue): \(result)", compactor: compactor, maxRecent: 4)
+        appendLog(result)
+        log(event: "executor_result", detail: result)
+
+        if action.type == .finish {
+            completeTask(message: "Task finished by planner.")
+            return .finished
+        }
+        if Self.indicatesFailure(result) {
+            log(event: "plan_aborted", detail: "Step result indicates failure; re-planning from fresh observation.")
+            return .replan
+        }
+        return .executed
     }
 
     private func requestApproval(action: StructuredAction, reason: String) async -> Bool {
@@ -435,11 +540,19 @@ public final class AgentController {
         modelSessionCloser?.closeLoadedModels()
     }
 
+    /// Connect modes (Ollama/LM Studio/OpenAI-compatible) talk to an already-
+    /// running server, so they use a no-launch runtime. Only the self-hosted
+    /// managed mode spawns a process. Planner and guard share one runtime so the
+    /// managed runner serves both from a single process/port.
+    private func makeRuntime(settings: AppSettings) -> any ManagedModelRuntime {
+        settings.modelProviderMode.isConnectMode ? ConnectOnlyModelRuntime() : ProcessManagedModelRuntime()
+    }
+
     private func makePlannerProvider(settings: AppSettings, runtime: any ManagedModelRuntime) -> any LocalModelProvider {
         switch settings.modelProviderMode {
         case .internalInProcess:
             InternalLocalModelProvider(role: .planner, configuration: settings.plannerConfiguration())
-        case .managedRuntime:
+        case .ollama, .lmStudio, .openAICompatible, .managedRuntime:
             ManagedLocalModelProvider(
                 configuration: settings.plannerConfiguration(),
                 runtimeConfiguration: settings.plannerRuntimeConfiguration(),
@@ -452,7 +565,7 @@ public final class AgentController {
         switch settings.modelProviderMode {
         case .internalInProcess:
             InternalLocalModelProvider(role: .guard, configuration: settings.guardConfiguration())
-        case .managedRuntime:
+        case .ollama, .lmStudio, .openAICompatible, .managedRuntime:
             ManagedLocalModelProvider(
                 configuration: settings.guardConfiguration(),
                 runtimeConfiguration: settings.guardRuntimeConfiguration(),

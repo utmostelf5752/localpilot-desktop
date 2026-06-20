@@ -34,12 +34,21 @@ public struct JSONGuardModel: GuardModel {
     }
 
     public func review(action: StructuredAction, context: AgentContext, policyDecision: PolicyDecision) async throws -> GuardDecision {
-        let response = try await provider.complete(
-            prompt: guardPrompt(action: action, context: context, policyDecision: policyDecision),
+        let prompt = guardPrompt(action: action, context: context, policyDecision: policyDecision)
+        let format = ModelResponseFormat.jsonSchema(name: "localpilot_guard", schema: StructuredOutputSchema.guardDecision)
+        // Guard stays text-only (no screenshot) so it remains fast and cheap.
+        let first = try await provider.complete(prompt: prompt, system: Self.systemPrompt, format: format)
+        if let decision = try? decoder.decode(GuardDecision.self, from: Data(JSONExtraction.extract(first).utf8)) {
+            return decision
+        }
+        // One schema-correction retry, then propagate the decode error so the
+        // tiered guard fails closed on an unparseable guard reply.
+        let retry = try await provider.complete(
+            prompt: prompt + "\n\nReturn ONLY {\"decision\":\"allow\"|\"deny\",\"reason\":\"...\"} as JSON, no markdown.",
             system: Self.systemPrompt,
-            format: .jsonSchema(name: "localpilot_guard", schema: StructuredOutputSchema.guardDecision)
+            format: format
         )
-        return try decoder.decode(GuardDecision.self, from: Data(response.utf8))
+        return try decoder.decode(GuardDecision.self, from: Data(JSONExtraction.extract(retry).utf8))
     }
 
     public func cancel() async {

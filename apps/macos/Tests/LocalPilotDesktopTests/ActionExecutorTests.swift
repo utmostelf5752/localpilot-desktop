@@ -3,6 +3,7 @@ import Testing
 @testable import LocalPilotDesktop
 
 actor SpyComputerController: ComputerControlling {
+    private(set) var moves: [CGPoint] = []
     private(set) var clicks: [CGPoint] = []
     private(set) var doubleClicks: [CGPoint] = []
     private(set) var typedText: [String] = []
@@ -13,6 +14,10 @@ actor SpyComputerController: ComputerControlling {
     private(set) var openedURLs: [String] = []
     private(set) var terminalCommands: [String] = []
     private(set) var switchedApps: [String] = []
+
+    func move(to point: CGPoint) async {
+        moves.append(point)
+    }
 
     func click(at point: CGPoint) async {
         clicks.append(point)

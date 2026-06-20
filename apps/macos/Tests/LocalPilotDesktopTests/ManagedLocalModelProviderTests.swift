@@ -96,6 +96,21 @@ private func makeRuntimeConfig() -> ManagedModelRuntimeConfiguration {
     )
 }
 
+private func makeOpenAIRuntimeConfig() -> ManagedModelRuntimeConfiguration {
+    ManagedModelRuntimeConfiguration(
+        executableURL: URL(fileURLWithPath: "/unused"),
+        modelURL: URL(fileURLWithPath: "/unused"),
+        host: "localhost",
+        port: 1234,
+        launchArguments: [],
+        environment: [:],
+        healthPath: "/v1/models",
+        completionsPath: "/v1/chat/completions",
+        baseURL: URL(string: "http://localhost:1234")!,
+        apiShape: .openAIChat
+    )
+}
+
 struct ManagedLocalModelProviderTests {
     @Test
     func completeStartsManagedRuntimeAndRequestsJsonFromLocalEndpoint() async throws {
@@ -136,7 +151,7 @@ struct ManagedLocalModelProviderTests {
     }
 
     @Test
-    func completeSendsJsonSchemaObjectUnderFormatAndJsonSchema() async throws {
+    func ollamaCompleteSendsSchemaObjectUnderFormatWithNumCtx() async throws {
         let client = MockHTTPClient()
         let runtime = StubManagedRuntime()
         await client.enqueue(HTTPResponse(data: Data(#"{"response":"{}"}"#.utf8), statusCode: 200))
@@ -156,13 +171,112 @@ struct ManagedLocalModelProviderTests {
         let requests = await client.requests
         #expect(requests.count == 1)
         let body = try #require(requests[0].jsonBody)
-        // The schema is sent as an object (not the string "json") under both keys
-        // so Ollama (`format`) and llama.cpp-server (`json_schema`) can honor it.
+        // Ollama reads the JSON Schema object from `format`; the spurious
+        // `json_schema` key is no longer sent.
         #expect(body["format"] as? String == nil)
         let formatObject = try #require(body["format"] as? [String: Any])
         #expect(formatObject["type"] as? String == "object")
-        let schemaObject = try #require(body["json_schema"] as? [String: Any])
-        #expect(schemaObject["type"] as? String == "object")
+        #expect(body["json_schema"] == nil)
+        // The configured context window is sent so the model uses it.
+        let options = try #require(body["options"] as? [String: Any])
+        #expect(options["num_ctx"] as? Int == 8192)
+    }
+
+    @Test
+    func openAIChatCompleteUsesMessagesAndResponseFormat() async throws {
+        let client = MockHTTPClient()
+        let runtime = StubManagedRuntime()
+        await client.enqueue(HTTPResponse(
+            data: Data(#"{"choices":[{"message":{"content":"{\"ok\":true}"}}]}"#.utf8),
+            statusCode: 200
+        ))
+        let provider = ManagedLocalModelProvider(
+            configuration: makeConfig(),
+            runtimeConfiguration: makeOpenAIRuntimeConfig(),
+            runtime: runtime,
+            httpClient: client
+        )
+
+        let result = try await provider.complete(
+            prompt: "Return JSON",
+            system: "You are a planner.",
+            format: .jsonSchema(name: "localpilot_action", schema: StructuredOutputSchema.action)
+        )
+
+        let requests = await client.requests
+        let body = try #require(requests[0].jsonBody)
+        #expect(body["prompt"] == nil)
+        let messages = try #require(body["messages"] as? [[String: Any]])
+        #expect(messages.first?["role"] as? String == "system")
+        #expect(messages.last?["role"] as? String == "user")
+        #expect(messages.last?["content"] as? String == "Return JSON")
+        let responseFormat = try #require(body["response_format"] as? [String: Any])
+        #expect(responseFormat["type"] as? String == "json_schema")
+        let jsonSchema = try #require(responseFormat["json_schema"] as? [String: Any])
+        #expect(jsonSchema["name"] as? String == "localpilot_action")
+        #expect(jsonSchema["strict"] as? Bool == true)
+        // And the OpenAI choices envelope is decoded.
+        #expect(result == #"{"ok":true}"#)
+    }
+
+    @Test
+    func openAIChatAttachesImagesAsContentParts() async throws {
+        let client = MockHTTPClient()
+        let runtime = StubManagedRuntime()
+        await client.enqueue(HTTPResponse(
+            data: Data(#"{"choices":[{"message":{"content":"ok"}}]}"#.utf8),
+            statusCode: 200
+        ))
+        let provider = ManagedLocalModelProvider(
+            configuration: makeConfig(),
+            runtimeConfiguration: makeOpenAIRuntimeConfig(),
+            runtime: runtime,
+            httpClient: client
+        )
+
+        _ = try await provider.complete(prompt: "look", system: nil, format: nil, images: ["BASE64JPEG"])
+
+        let body = try #require(await client.requests[0].jsonBody)
+        let messages = try #require(body["messages"] as? [[String: Any]])
+        let parts = try #require(messages.last?["content"] as? [[String: Any]])
+        #expect(parts.contains { $0["type"] as? String == "text" })
+        let imagePart = try #require(parts.first { $0["type"] as? String == "image_url" })
+        let imageURL = try #require(imagePart["image_url"] as? [String: Any])
+        #expect((imageURL["url"] as? String)?.hasPrefix("data:image/jpeg;base64,") == true)
+    }
+
+    @Test
+    func ollamaGenerateAttachesImagesArray() async throws {
+        let client = MockHTTPClient()
+        let runtime = StubManagedRuntime()
+        await client.enqueue(HTTPResponse(data: Data(#"{"response":"ok"}"#.utf8), statusCode: 200))
+        let provider = ManagedLocalModelProvider(
+            configuration: makeConfig(),
+            runtimeConfiguration: makeRuntimeConfig(),
+            runtime: runtime,
+            httpClient: client
+        )
+
+        _ = try await provider.complete(prompt: "look", system: nil, format: nil, images: ["BASE64JPEG"])
+
+        let body = try #require(await client.requests[0].jsonBody)
+        #expect(body["images"] as? [String] == ["BASE64JPEG"])
+    }
+
+    @Test
+    func decodesOllamaChatMessageContent() async throws {
+        let client = MockHTTPClient()
+        let runtime = StubManagedRuntime()
+        await client.enqueue(HTTPResponse(data: Data(#"{"message":{"content":"from-chat"}}"#.utf8), statusCode: 200))
+        let provider = ManagedLocalModelProvider(
+            configuration: makeConfig(),
+            runtimeConfiguration: makeRuntimeConfig(),
+            runtime: runtime,
+            httpClient: client
+        )
+
+        let result = try await provider.complete(prompt: "hi", system: nil, format: nil)
+        #expect(result == "from-chat")
     }
 
     @Test

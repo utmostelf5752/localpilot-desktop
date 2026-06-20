@@ -8,6 +8,22 @@ public enum ModelResponseFormat: Sendable, Equatable {
     case jsonSchema(name: String, schema: String)
 }
 
+/// The wire protocol a local endpoint speaks. LocalPilot connects to whichever
+/// the user is running; the request body, structured-output field, and response
+/// shape all differ per backend.
+public enum APIShape: String, Codable, Sendable {
+    /// Ollama native `POST /api/generate` — body uses `prompt` + `options` +
+    /// `format`; response is `{response}`.
+    case ollamaGenerate
+    /// Ollama native `POST /api/chat` — body uses `messages` + `options` +
+    /// `format`; response is `{message:{content}}`.
+    case ollamaChat
+    /// OpenAI-compatible `POST /v1/chat/completions` (LM Studio, llama.cpp
+    /// server, generic) — body uses `messages` + `response_format`; response is
+    /// `{choices:[{message:{content}}]}`.
+    case openAIChat
+}
+
 public struct ModelProviderConfiguration: Codable, Equatable, Sendable {
     public var providerName: String
     public var modelName: String
@@ -36,6 +52,11 @@ public struct ModelProviderConfiguration: Codable, Equatable, Sendable {
 public protocol LocalModelProvider: Sendable {
     var configuration: ModelProviderConfiguration { get }
     func complete(prompt: String, system: String?, format: ModelResponseFormat?) async throws -> String
+    /// Image-aware completion. `images` are base64 JPEG strings sent to a
+    /// vision-capable model. Defaulted to forward to the text-only overload so
+    /// existing providers/test doubles need no changes; only providers that
+    /// actually talk to a backend override this to attach the images.
+    func complete(prompt: String, system: String?, format: ModelResponseFormat?, images: [String]?) async throws -> String
     func healthCheck() async throws
     func cancel() async
     func closeModel() async throws
@@ -44,6 +65,10 @@ public protocol LocalModelProvider: Sendable {
 public extension LocalModelProvider {
     func complete(prompt: String) async throws -> String {
         try await complete(prompt: prompt, system: nil, format: nil)
+    }
+
+    func complete(prompt: String, system: String?, format: ModelResponseFormat?, images: [String]?) async throws -> String {
+        try await complete(prompt: prompt, system: system, format: format)
     }
 }
 
@@ -382,6 +407,12 @@ public struct ManagedModelRuntimeConfiguration: Codable, Equatable, Sendable {
     public var environment: [String: String]
     public var healthPath: String
     public var completionsPath: String
+    /// When set (connect-to-running-server modes), the endpoint is taken from
+    /// this URL verbatim — preserving scheme/host/port/path — instead of being
+    /// synthesized from host/port. Nil for the self-spawned managed runner.
+    public var baseURL: URL?
+    /// Which wire protocol the endpoint speaks. Drives request/response shaping.
+    public var apiShape: APIShape
 
     public init(
         executableURL: URL,
@@ -391,7 +422,9 @@ public struct ManagedModelRuntimeConfiguration: Codable, Equatable, Sendable {
         launchArguments: [String],
         environment: [String: String],
         healthPath: String,
-        completionsPath: String
+        completionsPath: String,
+        baseURL: URL? = nil,
+        apiShape: APIShape = .ollamaGenerate
     ) {
         self.executableURL = executableURL
         self.modelURL = modelURL
@@ -401,16 +434,50 @@ public struct ManagedModelRuntimeConfiguration: Codable, Equatable, Sendable {
         self.environment = environment
         self.healthPath = healthPath
         self.completionsPath = completionsPath
+        self.baseURL = baseURL
+        self.apiShape = apiShape
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case executableURL, modelURL, host, port, launchArguments
+        case environment, healthPath, completionsPath, baseURL, apiShape
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        executableURL = try c.decode(URL.self, forKey: .executableURL)
+        modelURL = try c.decode(URL.self, forKey: .modelURL)
+        host = try c.decode(String.self, forKey: .host)
+        port = try c.decode(Int.self, forKey: .port)
+        launchArguments = try c.decode([String].self, forKey: .launchArguments)
+        environment = try c.decode([String: String].self, forKey: .environment)
+        healthPath = try c.decode(String.self, forKey: .healthPath)
+        completionsPath = try c.decode(String.self, forKey: .completionsPath)
+        baseURL = try c.decodeIfPresent(URL.self, forKey: .baseURL)
+        apiShape = try c.decodeIfPresent(APIShape.self, forKey: .apiShape) ?? .ollamaGenerate
     }
 
     public var endpoint: URL {
-        URL(string: "http://\(host):\(port)")!
+        baseURL ?? URL(string: "http://\(host):\(port)")!
     }
 }
 
 public protocol ManagedModelRuntime: Sendable {
     func ensureRunning(configuration: ManagedModelRuntimeConfiguration) async throws -> URL
     func stop() async
+}
+
+/// Runtime for connecting to an already-running local server (Ollama, LM Studio,
+/// any OpenAI-compatible endpoint). It never launches or kills a process — it
+/// just returns the configured base URL — so the user owns the server lifecycle.
+public actor ConnectOnlyModelRuntime: ManagedModelRuntime {
+    public init() {}
+
+    public func ensureRunning(configuration: ManagedModelRuntimeConfiguration) async throws -> URL {
+        configuration.endpoint
+    }
+
+    public func stop() async {}
 }
 
 public actor ProcessManagedModelRuntime: ManagedModelRuntime {
@@ -584,6 +651,10 @@ public actor ManagedLocalModelProvider: LocalModelProvider {
     }
 
     public func complete(prompt: String, system: String?, format: ModelResponseFormat?) async throws -> String {
+        try await complete(prompt: prompt, system: system, format: format, images: nil)
+    }
+
+    public func complete(prompt: String, system: String?, format: ModelResponseFormat?, images: [String]?) async throws -> String {
         // Cancel any previously in-flight completion before starting a new one so
         // overlapping calls don't leak tasks or clobber `activeTask` bookkeeping.
         activeTask?.cancel()
@@ -592,37 +663,7 @@ public actor ManagedLocalModelProvider: LocalModelProvider {
             try Task.checkCancellation()
             let endpoint = try await self.runtime.ensureRunning(configuration: self.runtimeConfiguration)
             try Task.checkCancellation()
-            var payload: [String: Any] = [
-                "model": self.configuration.modelName,
-                "prompt": prompt,
-                "stream": false,
-                "options": [
-                    "temperature": self.configuration.temperature
-                ]
-            ]
-            if let system {
-                payload["system"] = system
-            }
-            switch format {
-            case .json:
-                payload["format"] = "json"
-            case let .jsonSchema(_, schema):
-                // Honor whichever local runtime is configured: Ollama reads the
-                // schema object from `format`, llama.cpp-server reads it from
-                // `json_schema`. If the schema string is not valid JSON, fall
-                // back to plain JSON mode so a bad schema never breaks completion.
-                if let schemaData = schema.data(using: .utf8),
-                   let schemaObject = try? JSONSerialization.jsonObject(with: schemaData),
-                   schemaObject is [String: Any] {
-                    payload["format"] = schemaObject
-                    payload["json_schema"] = schemaObject
-                } else {
-                    payload["format"] = "json"
-                }
-            case .none:
-                break
-            }
-
+            let payload = self.buildPayload(prompt: prompt, system: system, format: format, images: images)
             let response = try await self.postCompletion(endpoint: endpoint, payload: payload)
             try Task.checkCancellation()
             return try self.decodeCompletionResponse(response)
@@ -646,6 +687,127 @@ public actor ManagedLocalModelProvider: LocalModelProvider {
         }
     }
 
+    /// Build the request body for the configured backend. Ollama (`/api/generate`
+    /// and `/api/chat`) and OpenAI-compatible (`/v1/chat/completions`) have
+    /// different body shapes, structured-output fields, and image encodings.
+    private func buildPayload(prompt: String, system: String?, format: ModelResponseFormat?, images: [String]?) -> [String: Any] {
+        let model = configuration.modelName
+        let visionImages = (images?.isEmpty == false) ? images : nil
+
+        switch runtimeConfiguration.apiShape {
+        case .ollamaGenerate:
+            var payload: [String: Any] = [
+                "model": model,
+                "prompt": prompt,
+                "stream": false,
+                "options": ollamaOptions()
+            ]
+            if let system { payload["system"] = system }
+            if let visionImages { payload["images"] = visionImages }
+            applyOllamaFormat(&payload, format)
+            return payload
+
+        case .ollamaChat:
+            var messages: [[String: Any]] = []
+            if let system { messages.append(["role": "system", "content": system]) }
+            var userMessage: [String: Any] = ["role": "user", "content": prompt]
+            if let visionImages { userMessage["images"] = visionImages }
+            messages.append(userMessage)
+            var payload: [String: Any] = [
+                "model": model,
+                "messages": messages,
+                "stream": false,
+                "options": ollamaOptions()
+            ]
+            applyOllamaFormat(&payload, format)
+            return payload
+
+        case .openAIChat:
+            var messages: [[String: Any]] = []
+            if let system { messages.append(["role": "system", "content": system]) }
+            if let visionImages {
+                // OpenAI vision content is an array of text + image_url parts.
+                var parts: [[String: Any]] = [["type": "text", "text": prompt]]
+                for image in visionImages {
+                    parts.append([
+                        "type": "image_url",
+                        "image_url": ["url": "data:image/jpeg;base64,\(image)"]
+                    ])
+                }
+                messages.append(["role": "user", "content": parts])
+            } else {
+                messages.append(["role": "user", "content": prompt])
+            }
+            var payload: [String: Any] = [
+                "model": model,
+                "messages": messages,
+                "temperature": configuration.temperature,
+                "stream": false
+            ]
+            applyOpenAIFormat(&payload, format)
+            return payload
+        }
+    }
+
+    /// Ollama `options`: temperature plus the configured context window so the
+    /// model actually uses the window the user selected instead of its small
+    /// built-in default.
+    private func ollamaOptions() -> [String: Any] {
+        var options: [String: Any] = ["temperature": configuration.temperature]
+        if configuration.contextWindowSize > 0 {
+            options["num_ctx"] = configuration.contextWindowSize
+        }
+        return options
+    }
+
+    private func applyOllamaFormat(_ payload: inout [String: Any], _ format: ModelResponseFormat?) {
+        switch format {
+        case .json:
+            payload["format"] = "json"
+        case let .jsonSchema(_, schema):
+            // Ollama constrains output to a JSON Schema passed as `format`. A bad
+            // schema string falls back to plain JSON so it never breaks the call.
+            if let schemaObject = Self.schemaObject(from: schema) {
+                payload["format"] = schemaObject
+            } else {
+                payload["format"] = "json"
+            }
+        case .none:
+            break
+        }
+    }
+
+    private func applyOpenAIFormat(_ payload: inout [String: Any], _ format: ModelResponseFormat?) {
+        switch format {
+        case .json:
+            payload["response_format"] = ["type": "json_object"]
+        case let .jsonSchema(name, schema):
+            if let schemaObject = Self.schemaObject(from: schema) {
+                payload["response_format"] = [
+                    "type": "json_schema",
+                    "json_schema": [
+                        "name": name.isEmpty ? "response" : name,
+                        "schema": schemaObject,
+                        "strict": true
+                    ]
+                ]
+            } else {
+                payload["response_format"] = ["type": "json_object"]
+            }
+        case .none:
+            break
+        }
+    }
+
+    private static func schemaObject(from schema: String) -> [String: Any]? {
+        guard let data = schema.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dictionary = object as? [String: Any] else {
+            return nil
+        }
+        return dictionary
+    }
+
     public func healthCheck() async throws {
         let endpoint = try await runtime.ensureRunning(configuration: runtimeConfiguration)
         let url = endpoint.appending(path: normalizedPath(runtimeConfiguration.healthPath))
@@ -665,6 +827,25 @@ public actor ManagedLocalModelProvider: LocalModelProvider {
     }
 
     public func closeModel() async throws {
+        // For Ollama connect modes we don't own the server process, so we unload
+        // the model by asking the server to drop it (`keep_alive: 0`) rather than
+        // killing a process. Best-effort: failures are ignored. The self-spawned
+        // managed runner is torn down by `runtime.stop()` below.
+        if runtimeConfiguration.baseURL != nil,
+           runtimeConfiguration.apiShape == .ollamaGenerate || runtimeConfiguration.apiShape == .ollamaChat {
+            let endpoint = runtimeConfiguration.endpoint
+            let url = endpoint.appending(path: normalizedPath(runtimeConfiguration.completionsPath))
+            let unload: [String: Any] = ["model": configuration.modelName, "keep_alive": 0, "stream": false]
+            if let body = try? JSONSerialization.data(withJSONObject: unload) {
+                _ = try? await httpClient.data(for: HTTPRequest(
+                    url: url,
+                    method: "POST",
+                    headers: ["Content-Type": "application/json"],
+                    body: body,
+                    timeoutSeconds: max(1, min(configuration.timeoutSeconds, 5))
+                ))
+            }
+        }
         await runtime.stop()
     }
 
@@ -685,17 +866,28 @@ public actor ManagedLocalModelProvider: LocalModelProvider {
     }
 
     private func decodeCompletionResponse(_ data: Data) throws -> String {
+        struct Message: Decodable { let content: String? }
+        struct Choice: Decodable { let message: Message? }
         struct CompletionResponse: Decodable {
-            let response: String?
-            let text: String?
-            let content: String?
+            let response: String?      // Ollama /api/generate
+            let text: String?          // some llama.cpp servers
+            let content: String?       // flat content
+            let message: Message?      // Ollama /api/chat
+            let choices: [Choice]?     // OpenAI / LM Studio /v1/chat/completions
         }
 
-        guard let decoded = try? JSONDecoder().decode(CompletionResponse.self, from: data),
-              let response = decoded.response ?? decoded.text ?? decoded.content else {
+        guard let decoded = try? JSONDecoder().decode(CompletionResponse.self, from: data) else {
             throw ModelProviderError.invalidResponse
         }
-        return response
+        let text = decoded.response
+            ?? decoded.text
+            ?? decoded.content
+            ?? decoded.message?.content
+            ?? decoded.choices?.first?.message?.content
+        guard let text else {
+            throw ModelProviderError.invalidResponse
+        }
+        return text
     }
 }
 
@@ -727,4 +919,111 @@ public final class ModelSessionManager: ModelSessionClosing {
 
 private func normalizedPath(_ path: String) -> String {
     path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+}
+
+/// One model advertised by a running local server, with its context window when
+/// the server reports it.
+public struct DetectedModel: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let contextLength: Int?
+
+    public init(id: String, contextLength: Int? = nil) {
+        self.id = id
+        self.contextLength = contextLength
+    }
+}
+
+/// Queries an already-running Ollama or LM Studio / OpenAI-compatible server for
+/// the models it can serve and their context windows, so the UI can present a
+/// list instead of making the user type model ids and context sizes by hand.
+public struct ModelCatalogService: Sendable {
+    private let httpClient: HTTPClient
+
+    public init(httpClient: HTTPClient = URLSessionHTTPClient()) {
+        self.httpClient = httpClient
+    }
+
+    public func listModels(baseURL: URL, apiShape: APIShape, timeoutSeconds: TimeInterval = 8) async throws -> [DetectedModel] {
+        switch apiShape {
+        case .ollamaGenerate, .ollamaChat:
+            return try await ollamaModels(baseURL: baseURL, timeout: timeoutSeconds)
+        case .openAIChat:
+            return try await openAIModels(baseURL: baseURL, timeout: timeoutSeconds)
+        }
+    }
+
+    public func contextLength(baseURL: URL, apiShape: APIShape, model: String, timeoutSeconds: TimeInterval = 8) async throws -> Int? {
+        switch apiShape {
+        case .ollamaGenerate, .ollamaChat:
+            return try await ollamaContextLength(baseURL: baseURL, model: model, timeout: timeoutSeconds)
+        case .openAIChat:
+            return try await openAIModels(baseURL: baseURL, timeout: timeoutSeconds).first { $0.id == model }?.contextLength
+        }
+    }
+
+    // MARK: - Ollama
+
+    private func ollamaModels(baseURL: URL, timeout: TimeInterval) async throws -> [DetectedModel] {
+        let url = baseURL.appending(path: "api/tags")
+        let json = try await getJSONObject(url: url, timeout: timeout)
+        guard let models = json["models"] as? [[String: Any]] else { return [] }
+        return models.compactMap { entry in
+            guard let name = entry["name"] as? String else { return nil }
+            return DetectedModel(id: name, contextLength: nil)
+        }
+    }
+
+    private func ollamaContextLength(baseURL: URL, model: String, timeout: TimeInterval) async throws -> Int? {
+        let url = baseURL.appending(path: "api/show")
+        let body = try JSONSerialization.data(withJSONObject: ["name": model])
+        let response = try await httpClient.data(for: HTTPRequest(
+            url: url, method: "POST", headers: ["Content-Type": "application/json"], body: body, timeoutSeconds: timeout
+        ))
+        guard (200..<300).contains(response.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any],
+              let info = json["model_info"] as? [String: Any] else {
+            return nil
+        }
+        // The context-length key is namespaced by architecture, e.g.
+        // "llama.context_length" or "qwen2.context_length". Find whichever ends
+        // in ".context_length" (or is exactly "context_length").
+        for (key, value) in info where key.hasSuffix("context_length") {
+            if let intValue = value as? Int { return intValue }
+            if let number = value as? NSNumber { return number.intValue }
+        }
+        return nil
+    }
+
+    // MARK: - OpenAI-compatible (LM Studio, generic)
+
+    private func openAIModels(baseURL: URL, timeout: TimeInterval) async throws -> [DetectedModel] {
+        // LM Studio's native REST API exposes richer info (incl. context window).
+        if let lmStudio = try? await getJSONObject(url: baseURL.appending(path: "api/v0/models"), timeout: timeout),
+           let data = lmStudio["data"] as? [[String: Any]], !data.isEmpty {
+            return data.compactMap { entry in
+                guard let id = entry["id"] as? String else { return nil }
+                let ctx = (entry["max_context_length"] as? Int)
+                    ?? (entry["loaded_context_length"] as? Int)
+                    ?? (entry["max_context_length"] as? NSNumber)?.intValue
+                return DetectedModel(id: id, contextLength: ctx)
+            }
+        }
+        // Fall back to the standard OpenAI models list (ids only).
+        let json = try await getJSONObject(url: baseURL.appending(path: "v1/models"), timeout: timeout)
+        guard let data = json["data"] as? [[String: Any]] else { return [] }
+        return data.compactMap { entry in
+            (entry["id"] as? String).map { DetectedModel(id: $0, contextLength: nil) }
+        }
+    }
+
+    private func getJSONObject(url: URL, timeout: TimeInterval) async throws -> [String: Any] {
+        let response = try await httpClient.data(for: HTTPRequest(url: url, method: "GET", timeoutSeconds: timeout))
+        guard (200..<300).contains(response.statusCode) else {
+            throw ModelProviderError.badStatus(response.statusCode, String(data: response.data, encoding: .utf8) ?? "")
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any] else {
+            throw ModelProviderError.invalidResponse
+        }
+        return json
+    }
 }
