@@ -1,6 +1,6 @@
 import Foundation
 
-public struct LocalEvent: Codable, Sendable {
+public struct LocalEvent: Codable, Equatable, Sendable {
     public let timestamp: Date
     public let taskID: UUID?
     public let event: String

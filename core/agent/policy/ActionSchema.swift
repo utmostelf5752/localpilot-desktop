@@ -121,6 +121,9 @@ public struct AgentContext: Codable, Equatable, Sendable {
     public var allowedFolders: Set<String>
     public var visibleText: String
     public var activeFieldKind: String?
+    /// Latest screen capture for this observation, retained so the UI can show a
+    /// per-turn thumbnail in task history. Never fed into the model prompt.
+    public var latestScreenshotPNGBase64: String? = nil
 
     public static let empty = AgentContext(
         activeApp: nil,

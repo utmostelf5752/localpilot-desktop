@@ -11,18 +11,16 @@ struct MainWindowView: View {
             SidebarView(selection: $selectedSection)
         } detail: {
             switch selectedSection {
-            case .newTask, .pastTasks:
+            case .newTask:
                 HStack(spacing: 0) {
                     ChatPanelView(controller: controller, taskText: $taskText)
                     Divider()
-                    InspectorPanelView(controller: controller)
+                    TaskInspectorView(controller: controller)
                 }
+            case .pastTasks:
+                TasksView(controller: controller)
             case .settings:
-                SettingsPanelView(controller: controller)
-            case .permissions:
-                PermissionsPanelView()
-            case .logs:
-                LogsPanelView(controller: controller)
+                SettingsView(controller: controller)
             }
         }
         .onAppear {
@@ -117,8 +115,6 @@ private enum SidebarSection: String, CaseIterable, Identifiable {
     case newTask = "New task"
     case pastTasks = "Past tasks"
     case settings = "Settings"
-    case permissions = "Permissions"
-    case logs = "Logs"
 
     var id: String { rawValue }
 }
@@ -140,212 +136,7 @@ private struct SidebarView: View {
         case .newTask: "plus.message"
         case .pastTasks: "clock"
         case .settings: "gearshape"
-        case .permissions: "lock.shield"
-        case .logs: "doc.text.magnifyingglass"
         }
-    }
-}
-
-private struct InspectorPanelView: View {
-    let controller: AgentController
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("State")
-                .font(.headline)
-
-            StatusRow(label: "Run", value: controller.runStatus.rawValue)
-            StatusRow(label: "Overlay", value: controller.overlayState.rawValue)
-            StatusRow(label: "Executor", value: controller.executorEnabled ? "enabled" : "disabled")
-            StatusRow(label: "Action", value: controller.currentActionLabel)
-            StatusRow(label: "Runtime", value: controller.providerStatus)
-
-            Divider()
-
-            Text("Scope")
-                .font(.headline)
-            StatusRow(label: "Domains", value: controller.state.allowedDomains.isEmpty ? "none" : controller.state.allowedDomains.joined(separator: ", "))
-            StatusRow(label: "Apps", value: controller.state.allowedApps.isEmpty ? "none" : controller.state.allowedApps.joined(separator: ", "))
-            StatusRow(label: "Folders", value: controller.state.allowedFolders.isEmpty ? "none" : controller.state.allowedFolders.joined(separator: ", "))
-
-            Divider()
-
-            Text("Recent logs")
-                .font(.headline)
-            // Log snippets can legitimately repeat (e.g. identical executor
-            // results), so identify by position to keep IDs unique. Using
-            // `id: \.self` on a `[String]` with duplicates yields undefined
-            // diffing behavior in SwiftUI.
-            ForEach(Array(controller.recentLogSnippets.enumerated()), id: \.offset) { _, item in
-                Text(item)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-
-            Spacer()
-
-            Text(controller.logFileURL.path)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .textSelection(.enabled)
-        }
-        .padding(18)
-        .frame(width: 300)
-        .background(Color(nsColor: .controlBackgroundColor))
-    }
-}
-
-private struct SettingsPanelView: View {
-    @Bindable var controller: AgentController
-
-    var body: some View {
-        Form {
-            Section("Managed Local Runtime") {
-                Picker("Model provider", selection: $controller.settings.modelProviderMode) {
-                    ForEach(ModelProviderMode.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                TextField("Runtime executable", text: urlBinding(\.runtimeExecutableURL))
-                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
-                TextField("Planner model file", text: urlBinding(\.plannerModelURL))
-                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
-                TextField("Guard model file", text: urlBinding(\.guardModelURL))
-                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
-                TextField("Planner model", text: $controller.settings.plannerModel)
-                TextField("Guard model", text: $controller.settings.guardModel)
-                TextField("Host", text: $controller.settings.runtimeHost)
-                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
-                Stepper("Port: \(controller.settings.runtimePort)", value: $controller.settings.runtimePort, in: 1024...65535, step: 1)
-                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
-                TextField("Launch arguments", text: stringListBinding(\.runtimeLaunchArguments))
-                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
-                TextField("Health path", text: $controller.settings.runtimeHealthPath)
-                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
-                TextField("Completion path", text: $controller.settings.runtimeCompletionsPath)
-                    .disabled(controller.settings.modelProviderMode == .internalInProcess)
-                Toggle("Unload models after each run", isOn: $controller.settings.unloadModelsAfterRun)
-                Toggle("Use guard model", isOn: $controller.settings.useGuardModel)
-                Toggle("Dry-run execution only", isOn: $controller.settings.dryRunExecutionOnly)
-                HStack {
-                    Button("Test Connection") {
-                        controller.testModelRuntimeConnection()
-                    }
-                    Button("Save Settings") {
-                        controller.saveSettings()
-                    }
-                    Spacer()
-                    Text(controller.settingsStatus)
-                        .foregroundStyle(.secondary)
-                }
-                Text(controller.providerStatus)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Model Options") {
-                Stepper("Context window: \(controller.settings.contextWindowSize)", value: $controller.settings.contextWindowSize, in: 1024...262144, step: 1024)
-                HStack {
-                    Text("Temperature")
-                    Slider(value: $controller.settings.temperature, in: 0...1)
-                    Text(controller.settings.temperature, format: .number.precision(.fractionLength(2)))
-                        .frame(width: 44, alignment: .trailing)
-                }
-                Stepper("Timeout: \(Int(controller.settings.timeoutSeconds))s", value: $controller.settings.timeoutSeconds, in: 5...600, step: 5)
-            }
-
-            Section("Task Scope") {
-                TextField("Allowed domains, comma separated", text: listBinding(\.allowedDomains))
-                TextField("Allowed apps, comma separated", text: listBinding(\.allowedApps))
-                TextField("Allowed folders, comma separated", text: listBinding(\.allowedFolders))
-            }
-        }
-        .formStyle(.grouped)
-        .padding(24)
-        .navigationTitle("Settings")
-    }
-
-    private func urlBinding(_ keyPath: WritableKeyPath<AppSettings, URL>) -> Binding<String> {
-        Binding(
-            get: { controller.settings[keyPath: keyPath].path },
-            set: { value in
-                if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    controller.settings[keyPath: keyPath] = URL(fileURLWithPath: value)
-                }
-            }
-        )
-    }
-
-    private func stringListBinding(_ keyPath: WritableKeyPath<AppSettings, [String]>) -> Binding<String> {
-        Binding(
-            get: { controller.settings[keyPath: keyPath].joined(separator: " ") },
-            set: { value in
-                controller.settings[keyPath: keyPath] = value
-                    .split(separator: " ")
-                    .map(String.init)
-            }
-        )
-    }
-
-    private func listBinding(_ keyPath: WritableKeyPath<AppSettings, [String]>) -> Binding<String> {
-        Binding(
-            get: { controller.settings[keyPath: keyPath].joined(separator: ", ") },
-            set: { value in
-                controller.settings[keyPath: keyPath] = value
-                    .split(separator: ",")
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-            }
-        )
-    }
-}
-
-private struct PermissionsPanelView: View {
-    private let rows: [PermissionSummary] = [
-        PermissionSummary(permission: .screenRecording, requiredFor: "Future screen observation through ScreenCaptureKit.", milestone: "Milestone 4"),
-        PermissionSummary(permission: .accessibility, requiredFor: "Future AXUIElement semantic UI observation and controlled interaction.", milestone: "Milestone 4"),
-        PermissionSummary(permission: .inputMonitoring, requiredFor: "Future keyboard/mouse event execution through Quartz where required.", milestone: "Milestone 8+"),
-        PermissionSummary(permission: .automation, requiredFor: "Future narrow app-specific automation scopes.", milestone: "Milestone 8+")
-    ]
-
-    var body: some View {
-        List(rows, id: \.permission.rawValue) { row in
-            VStack(alignment: .leading, spacing: 6) {
-                Text(row.permission.rawValue)
-                    .font(.headline)
-                Text(row.requiredFor)
-                    .foregroundStyle(.secondary)
-                Text(row.milestone)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
-            .padding(.vertical, 8)
-        }
-        .navigationTitle("Permissions")
-    }
-}
-
-private struct LogsPanelView: View {
-    let controller: AgentController
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Local Logs")
-                .font(.title2.weight(.semibold))
-            Text(controller.logFileURL.path)
-                .font(.callout.monospaced())
-                .textSelection(.enabled)
-            Divider()
-            ForEach(Array(controller.recentLogSnippets.enumerated()), id: \.offset) { _, item in
-                Text(item)
-                    .font(.body)
-            }
-            Spacer()
-        }
-        .padding(24)
-        .navigationTitle("Logs")
     }
 }
 

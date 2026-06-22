@@ -3,13 +3,49 @@ import Foundation
 public enum ModelProviderMode: String, Codable, CaseIterable, Identifiable, Sendable {
     case internalInProcess = "internal_in_process"
     case managedRuntime = "managed_runtime"
+    case apiProvider = "api_provider"
+    case ollama = "ollama"
+    case lmStudio = "lm_studio"
 
     public var id: String { rawValue }
+
+    /// The modes the user can pick in Settings. `internalInProcess` and
+    /// `managedRuntime` stay in the enum for back-compat / tests but are no
+    /// longer user-selectable.
+    public static let selectableCases: [ModelProviderMode] = [.apiProvider, .ollama, .lmStudio]
+
+    /// True for providers that expose an HTTP model list we can auto-detect.
+    public var supportsModelDiscovery: Bool {
+        self == .ollama || self == .lmStudio
+    }
 
     public var displayName: String {
         switch self {
         case .internalInProcess: "Internal in-process"
         case .managedRuntime: "Managed runtime"
+        case .apiProvider: "Cloud API"
+        case .ollama: "Ollama"
+        case .lmStudio: "LM Studio"
+        }
+    }
+}
+
+/// How much the agent asks before acting.
+/// - accept: pause for approval on every action (most cautious)
+/// - risky:  pause only when policy/guard flags an action (the default)
+/// - yolo:   never pause for approval; deterministic blocks still block
+public enum ApprovalMode: String, Codable, CaseIterable, Identifiable, Sendable {
+    case accept
+    case risky
+    case yolo
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .accept: "Accept each"
+        case .risky: "Risky only"
+        case .yolo: "YOLO"
         }
     }
 }
@@ -31,6 +67,12 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var runtimeEnvironment: [String: String]
     public var runtimeHealthPath: String
     public var runtimeCompletionsPath: String
+    // ponytail: API key kept in settings.json plaintext; move to Keychain before shipping.
+    public var apiBaseURL: URL
+    public var apiKey: String
+    public var ollamaBaseURL: URL
+    public var lmStudioBaseURL: URL
+    public var approvalMode: ApprovalMode
     public var plannerModel: String
     public var guardModel: String
     public var contextWindowSize: Int
@@ -55,6 +97,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         runtimeEnvironment: [:],
         runtimeHealthPath: "/health",
         runtimeCompletionsPath: "/v1/localpilot/complete",
+        apiBaseURL: URL(string: "https://api.openai.com/v1")!,
+        apiKey: "",
+        ollamaBaseURL: URL(string: "http://localhost:11434")!,
+        lmStudioBaseURL: URL(string: "http://localhost:1234")!,
+        approvalMode: .risky,
         plannerModel: "planner.gguf",
         guardModel: "guard.gguf",
         contextWindowSize: Self.maximumContextWindowSize,
@@ -137,6 +184,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case runtimeEnvironment
         case runtimeHealthPath
         case runtimeCompletionsPath
+        case apiBaseURL
+        case apiKey
+        case ollamaBaseURL
+        case lmStudioBaseURL
+        case approvalMode
         case plannerModel
         case guardModel
         case contextWindowSize
@@ -162,6 +214,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         runtimeEnvironment: [String: String],
         runtimeHealthPath: String,
         runtimeCompletionsPath: String,
+        apiBaseURL: URL,
+        apiKey: String,
+        ollamaBaseURL: URL,
+        lmStudioBaseURL: URL,
+        approvalMode: ApprovalMode,
         plannerModel: String,
         guardModel: String,
         contextWindowSize: Int,
@@ -185,6 +242,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.runtimeEnvironment = runtimeEnvironment
         self.runtimeHealthPath = runtimeHealthPath
         self.runtimeCompletionsPath = runtimeCompletionsPath
+        self.apiBaseURL = apiBaseURL
+        self.apiKey = apiKey
+        self.ollamaBaseURL = ollamaBaseURL
+        self.lmStudioBaseURL = lmStudioBaseURL
+        self.approvalMode = approvalMode
         self.plannerModel = plannerModel
         self.guardModel = guardModel
         self.contextWindowSize = contextWindowSize
@@ -212,6 +274,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         runtimeEnvironment = try container.decodeIfPresent([String: String].self, forKey: .runtimeEnvironment) ?? defaults.runtimeEnvironment
         runtimeHealthPath = try container.decodeIfPresent(String.self, forKey: .runtimeHealthPath) ?? defaults.runtimeHealthPath
         runtimeCompletionsPath = try container.decodeIfPresent(String.self, forKey: .runtimeCompletionsPath) ?? defaults.runtimeCompletionsPath
+        apiBaseURL = try container.decodeIfPresent(URL.self, forKey: .apiBaseURL) ?? defaults.apiBaseURL
+        apiKey = try container.decodeIfPresent(String.self, forKey: .apiKey) ?? defaults.apiKey
+        ollamaBaseURL = try container.decodeIfPresent(URL.self, forKey: .ollamaBaseURL) ?? defaults.ollamaBaseURL
+        lmStudioBaseURL = try container.decodeIfPresent(URL.self, forKey: .lmStudioBaseURL) ?? defaults.lmStudioBaseURL
+        approvalMode = try container.decodeIfPresent(ApprovalMode.self, forKey: .approvalMode) ?? defaults.approvalMode
         plannerModel = try container.decodeIfPresent(String.self, forKey: .plannerModel) ?? defaults.plannerModel
         guardModel = try container.decodeIfPresent(String.self, forKey: .guardModel) ?? defaults.guardModel
         contextWindowSize = try container.decodeIfPresent(Int.self, forKey: .contextWindowSize) ?? defaults.contextWindowSize
@@ -232,6 +299,9 @@ private extension ModelProviderMode {
         switch self {
         case .internalInProcess: "internal-in-process"
         case .managedRuntime: "managed-local"
+        case .apiProvider: "cloud-api"
+        case .ollama: "ollama"
+        case .lmStudio: "lm-studio"
         }
     }
 }

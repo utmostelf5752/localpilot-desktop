@@ -699,6 +699,133 @@ public actor ManagedLocalModelProvider: LocalModelProvider {
     }
 }
 
+/// Talks to any OpenAI-compatible chat-completions endpoint (OpenAI, OpenRouter,
+/// Together, a local llama.cpp/Ollama OpenAI shim, etc.). One small POST; no
+/// process lifecycle to manage, so `closeModel` is a no-op.
+public actor APIModelProvider: LocalModelProvider {
+    public let configuration: ModelProviderConfiguration
+    private let baseURL: URL
+    private let apiKey: String
+    private let httpClient: HTTPClient
+    private var activeTask: Task<String, Error>?
+
+    public init(
+        configuration: ModelProviderConfiguration,
+        baseURL: URL,
+        apiKey: String,
+        httpClient: HTTPClient = URLSessionHTTPClient()
+    ) {
+        self.configuration = configuration
+        self.baseURL = baseURL
+        self.apiKey = apiKey
+        self.httpClient = httpClient
+    }
+
+    public func complete(prompt: String, system: String?, format: ModelResponseFormat?) async throws -> String {
+        activeTask?.cancel()
+        let task = Task<String, Error> {
+            try Task.checkCancellation()
+            var messages: [[String: Any]] = []
+            if let system {
+                messages.append(["role": "system", "content": system])
+            }
+            messages.append(["role": "user", "content": prompt])
+            var payload: [String: Any] = [
+                "model": self.configuration.modelName,
+                "temperature": self.configuration.temperature,
+                "stream": false,
+                "messages": messages
+            ]
+            switch format {
+            case .json:
+                payload["response_format"] = ["type": "json_object"]
+            case let .jsonSchema(name, schema):
+                if let schemaData = schema.data(using: .utf8),
+                   let schemaObject = try? JSONSerialization.jsonObject(with: schemaData),
+                   schemaObject is [String: Any] {
+                    payload["response_format"] = [
+                        "type": "json_schema",
+                        "json_schema": ["name": name, "schema": schemaObject]
+                    ]
+                } else {
+                    payload["response_format"] = ["type": "json_object"]
+                }
+            case .none:
+                break
+            }
+            let data = try await self.postChatCompletion(payload: payload)
+            try Task.checkCancellation()
+            return try self.decodeChatResponse(data)
+        }
+        activeTask = task
+        defer {
+            if activeTask == task { activeTask = nil }
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    public func healthCheck() async throws {
+        let url = baseURL.appending(path: "models")
+        let response = try await httpClient.data(for: HTTPRequest(
+            url: url,
+            method: "GET",
+            headers: authHeaders(),
+            timeoutSeconds: configuration.timeoutSeconds
+        ))
+        guard (200..<300).contains(response.statusCode) else {
+            throw ModelProviderError.badStatus(response.statusCode, String(data: response.data, encoding: .utf8) ?? "")
+        }
+    }
+
+    public func cancel() {
+        activeTask?.cancel()
+        activeTask = nil
+    }
+
+    public func closeModel() async throws {}
+
+    private func postChatCompletion(payload: [String: Any]) async throws -> Data {
+        let url = baseURL.appending(path: "chat/completions")
+        let body = try JSONSerialization.data(withJSONObject: payload)
+        var headers = authHeaders()
+        headers["Content-Type"] = "application/json"
+        let response = try await httpClient.data(for: HTTPRequest(
+            url: url,
+            method: "POST",
+            headers: headers,
+            body: body,
+            timeoutSeconds: configuration.timeoutSeconds
+        ))
+        guard (200..<300).contains(response.statusCode) else {
+            throw ModelProviderError.badStatus(response.statusCode, String(data: response.data, encoding: .utf8) ?? "")
+        }
+        return response.data
+    }
+
+    private func authHeaders() -> [String: String] {
+        apiKey.isEmpty ? [:] : ["Authorization": "Bearer \(apiKey)"]
+    }
+
+    private func decodeChatResponse(_ data: Data) throws -> String {
+        struct ChatResponse: Decodable {
+            struct Choice: Decodable {
+                struct Message: Decodable { let content: String? }
+                let message: Message?
+            }
+            let choices: [Choice]?
+        }
+        guard let decoded = try? JSONDecoder().decode(ChatResponse.self, from: data),
+              let content = decoded.choices?.first?.message?.content else {
+            throw ModelProviderError.invalidResponse
+        }
+        return content
+    }
+}
+
 public protocol ModelSessionClosing: AnyObject {
     @MainActor func closeLoadedModels()
 }

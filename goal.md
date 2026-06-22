@@ -745,3 +745,21 @@ When finished, report:
 - How to run it
 - What permissions are needed
 - What the next Codex task should be
+---
+
+## Feature Loop (read first, for scheduled autonomous runs)
+You are an autonomous dev agent working on this project on a schedule. Each run:
+1. Read this file (the spec above is your north star).
+2. Pick the single highest-value unchecked item from the Backlog below.
+3. Implement it. Build it (xcodebuild) and fix anything you break.
+4. Move the finished item to Done with a one-line note and today's date.
+5. Add 1-3 new feature or improvement ideas to Backlog for the next run.
+Keep each run's diff small and shippable. Never leave the build broken.
+
+## Backlog
+- [ ] Chat window shell with task input field.
+- [ ] Agent Mode: transparent always-on-top haze overlay.
+- [ ] Fake AI cursor overlay showing intended action location.
+- [ ] Floating controls overlay with Pause and Stop buttons.
+
+## Done

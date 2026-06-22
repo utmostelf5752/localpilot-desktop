@@ -20,6 +20,11 @@ public final class AgentController {
     public private(set) var settingsStatus = "Settings loaded"
     public private(set) var providerStatus = "Not connected"
     public private(set) var pendingApproval: PendingApproval?
+    /// Live event log for the in-progress task, shown by the Activity view.
+    public private(set) var currentTaskEvents: [LocalEvent] = []
+
+    /// Persisted past-task transcripts, surfaced in the Tasks list.
+    @ObservationIgnored public let taskSessionStore: TaskSessionStore
 
     @ObservationIgnored private let logger: LocalEventLogger
     @ObservationIgnored private let settingsStore: SettingsStore
@@ -32,10 +37,17 @@ public final class AgentController {
     @ObservationIgnored private var activeTaskID: UUID?
     @ObservationIgnored private var approvalDecision: ApprovalDecision?
     @ObservationIgnored private var history = AgentHistory()
+    @ObservationIgnored private var sessionCreatedAt = Date()
+    @ObservationIgnored private var turnScreenshotIndex = 0
+    /// Index into `messages` where the current task's transcript begins, so each
+    /// persisted session captures only its own turns (the live chat is one
+    /// continuous stream).
+    @ObservationIgnored private var sessionMessageStartIndex = 0
 
     public init(
         logger: LocalEventLogger = LocalEventLogger(),
         settingsStore: SettingsStore = SettingsStore(),
+        taskSessionStore: TaskSessionStore = TaskSessionStore(),
         screenObserver: any ScreenObserving = LiveScreenObserver(),
         executor: (any ActionExecutor)? = nil,
         modelSessionCloser: ModelSessionClosing? = nil,
@@ -43,6 +55,7 @@ public final class AgentController {
     ) {
         self.logger = logger
         self.settingsStore = settingsStore
+        self.taskSessionStore = taskSessionStore
         self.contextBuilder = AgentContextBuilder(screenObserver: screenObserver)
         self.executor = executor ?? LocalPilotActionExecutor(screenObserver: screenObserver)
         self.modelSessionCloser = modelSessionCloser
@@ -63,6 +76,9 @@ public final class AgentController {
         let taskID = UUID()
         activeTaskID = taskID
         history = AgentHistory()
+        currentTaskEvents = []
+        turnScreenshotIndex = 0
+        sessionCreatedAt = Date()
         state = LocalPilotState.empty
         state.taskID = taskID
         state.originalTask = task
@@ -71,6 +87,7 @@ public final class AgentController {
         state.allowedApps = settings.allowedApps
         state.allowedFolders = settings.allowedFolders
 
+        sessionMessageStartIndex = messages.count
         messages.append(ChatMessage(role: .user, text: task))
         messages.append(ChatMessage(role: .agent, text: "Starting Agent Mode with managed local planner/guard integration. Observe actions now capture current screen metadata; non-observe execution remains dry-run unless a later permissioned executor is enabled."))
         runStatus = .running
@@ -176,27 +193,26 @@ public final class AgentController {
         }
     }
 
-    public func testModelRuntimeConnection() {
-        let settings = settings
-        providerStatus = settings.modelProviderMode == .internalInProcess
-            ? "Checking internal model..."
-            : "Checking local runtime..."
+    /// Verifies the provider end to end: reach the server, load the selected
+    /// model into memory with a tiny completion, then unload it again so the
+    /// check leaves no model resident.
+    public func testModelRuntimeConnection(using settingsOverride: AppSettings? = nil) {
+        let settings = settingsOverride ?? settings
+        providerStatus = "Loading model into memory..."
         Task {
             let provider = makePlannerProvider(settings: settings, runtime: ProcessManagedModelRuntime())
             do {
                 try await provider.healthCheck()
+                _ = try await provider.complete(prompt: "ping", system: nil, format: nil)
                 try? await provider.closeModel()
                 await MainActor.run {
-                    providerStatus = settings.modelProviderMode == .internalInProcess
-                        ? "Internal model ready"
-                        : "Managed runtime connected"
+                    providerStatus = "Model loaded and unloaded OK"
                     appendLog(providerStatus)
                 }
             } catch {
+                try? await provider.closeModel()
                 await MainActor.run {
-                    providerStatus = settings.modelProviderMode == .internalInProcess
-                        ? "Internal model failed: \(error.localizedDescription)"
-                        : "Managed runtime failed: \(error.localizedDescription)"
+                    providerStatus = "Connection failed: \(error.localizedDescription)"
                     appendLog(providerStatus)
                 }
             }
@@ -230,14 +246,10 @@ public final class AgentController {
         state.lastObservationSummary = context.visibleText.components(separatedBy: "\n").last ?? ""
 
         do {
-            currentActionLabel = settings.modelProviderMode == .internalInProcess
-                ? "Checking internal model"
-                : "Checking local runtime"
+            currentActionLabel = "Checking \(settings.modelProviderMode.displayName)"
             providerStatus = currentActionLabel + "..."
             try await plannerProvider.healthCheck()
-            providerStatus = settings.modelProviderMode == .internalInProcess
-                ? "Internal model ready"
-                : "Managed runtime connected"
+            providerStatus = "\(settings.modelProviderMode.displayName) connected"
 
             let maxActions = 20
             let maxPlan = 6
@@ -286,21 +298,31 @@ public final class AgentController {
                         log(event: "screen_observed", detail: state.lastObservationSummary)
                     }
 
-                    messages.append(ChatMessage(role: .agent, text: "Proposed `\(action.type.rawValue)`: \(action.expectedResult)"))
+                    let turnScreenshot = saveTurnScreenshot(context.latestScreenshotPNGBase64)
+                    messages.append(ChatMessage(role: .agent, text: "Proposed `\(action.type.rawValue)`: \(action.expectedResult)", screenshotPath: turnScreenshot))
                     currentActionLabel = "Policy check: \(action.type.rawValue)"
 
                     let policy = policyEngine.classify(action: action, context: context)
                     log(event: "policy_decision", detail: "\(policy.classification.rawValue): \(policy.reason)")
 
+                    // Approval gating respects the user's approval mode:
+                    // - yolo:   never pause; deterministic blocks still block.
+                    // - risky:  pause only on policy/guard-flagged actions (askUser).
+                    // - accept: pause on every action, including plain allows.
                     switch policy.classification {
                     case .block:
                         blockTask(reason: policy.reason, action: action)
                         return
                     case .askUser:
-                        let allowed = await requestApproval(action: action, reason: policy.reason)
-                        guard allowed else { return }
+                        if settings.approvalMode != .yolo {
+                            let allowed = await requestApproval(action: action, reason: policy.reason)
+                            guard allowed else { return }
+                        }
                     case .allow:
-                        break
+                        if settings.approvalMode == .accept {
+                            let allowed = await requestApproval(action: action, reason: "Approval mode: confirm every action.")
+                            guard allowed else { return }
+                        }
                     }
 
                     if settings.useGuardModel {
@@ -425,8 +447,58 @@ public final class AgentController {
             detail: detail,
             currentAction: currentActionLabel
         )
+        if activeTaskID != nil {
+            currentTaskEvents.append(logEvent)
+            syncSession()
+        }
         Task {
             await logger.log(logEvent)
+        }
+    }
+
+    /// Mirror the in-progress run into the persisted session store so the Tasks
+    /// list and history reflect it live and survive relaunch. Pin/archive flags
+    /// set by the user are preserved across syncs.
+    private func syncSession() {
+        guard let taskID = activeTaskID else { return }
+        let transcript = sessionMessageStartIndex <= messages.count
+            ? Array(messages[sessionMessageStartIndex...])
+            : messages
+        let title = state.originalTask.prefix(60).trimmingCharacters(in: .whitespacesAndNewlines)
+        let isTerminal = runStatus == .done || runStatus == .blocked || runStatus == .stopped
+        let existing = taskSessionStore.sessions.first { $0.id == taskID }
+        let session = TaskSession(
+            id: taskID,
+            displayTitle: title.isEmpty ? "Task" : title,
+            originalTask: state.originalTask,
+            createdAt: sessionCreatedAt,
+            completedAt: isTerminal ? Date() : existing?.completedAt,
+            status: runStatus,
+            messages: transcript,
+            events: currentTaskEvents,
+            isPinned: existing?.isPinned ?? false,
+            archivedAt: existing?.archivedAt
+        )
+        taskSessionStore.upsert(session)
+    }
+
+    /// Persist a per-turn screenshot to disk and return its path, so task history
+    /// can show the screen exactly as it was when the action was proposed.
+    private func saveTurnScreenshot(_ base64: String?) -> String? {
+        guard let base64,
+              let data = Data(base64Encoded: base64),
+              let taskID = activeTaskID else { return nil }
+        let dir = AppSettings.defaultSupportDirectory()
+            .appending(path: "screenshots", directoryHint: .isDirectory)
+            .appending(path: taskID.uuidString, directoryHint: .isDirectory)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            turnScreenshotIndex += 1
+            let url = dir.appending(path: "turn-\(turnScreenshotIndex).png")
+            try data.write(to: url, options: .atomic)
+            return url.path
+        } catch {
+            return nil
         }
     }
 
@@ -445,6 +517,16 @@ public final class AgentController {
                 runtimeConfiguration: settings.plannerRuntimeConfiguration(),
                 runtime: runtime
             )
+        case .apiProvider:
+            APIModelProvider(
+                configuration: settings.plannerConfiguration(),
+                baseURL: settings.apiBaseURL,
+                apiKey: settings.apiKey
+            )
+        case .ollama:
+            makeOllamaProvider(configuration: settings.plannerConfiguration(), baseURL: settings.ollamaBaseURL)
+        case .lmStudio:
+            makeLMStudioProvider(configuration: settings.plannerConfiguration(), baseURL: settings.lmStudioBaseURL)
         }
     }
 
@@ -458,6 +540,16 @@ public final class AgentController {
                 runtimeConfiguration: settings.guardRuntimeConfiguration(),
                 runtime: runtime
             )
+        case .apiProvider:
+            APIModelProvider(
+                configuration: settings.guardConfiguration(),
+                baseURL: settings.apiBaseURL,
+                apiKey: settings.apiKey
+            )
+        case .ollama:
+            makeOllamaProvider(configuration: settings.guardConfiguration(), baseURL: settings.ollamaBaseURL)
+        case .lmStudio:
+            makeLMStudioProvider(configuration: settings.guardConfiguration(), baseURL: settings.lmStudioBaseURL)
         }
     }
 }

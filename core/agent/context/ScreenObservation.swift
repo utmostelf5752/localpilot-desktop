@@ -237,7 +237,7 @@ public struct LiveScreenObserver: ScreenObserving {
     /// the controls a planner would want to click or type into.
     private static let actionableRoles: Set<String> = [
         kAXButtonRole as String,
-        kAXLinkRole as String,
+        "AXLink",   // no kAXLinkRole constant exists in the SDK; AX link role value is "AXLink"
         kAXTextFieldRole as String,
         kAXTextAreaRole as String,
         kAXMenuItemRole as String,
@@ -399,7 +399,8 @@ public struct AgentContextBuilder: Sendable {
             allowedApps: Set(settings.allowedApps),
             allowedFolders: Set(settings.allowedFolders),
             visibleText: visibleText,
-            activeFieldKind: nil
+            activeFieldKind: nil,
+            latestScreenshotPNGBase64: observation.screenshotPNGBase64
         )
     }
 }
