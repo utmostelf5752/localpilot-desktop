@@ -317,8 +317,10 @@ public actor LocalPilotActionExecutor: ActionExecutor {
     }
 
     public func setPaused(_ paused: Bool) {
+        // Pause is distinct from the kill switch: only toggle `paused` so a paused
+        // executor reports "Executor paused." rather than tripping the `enabled`
+        // guard. `enabled` is owned solely by stopImmediately().
         self.paused = paused
-        enabled = !paused
     }
 
     private func dryRunResult(for action: StructuredAction) -> String {
@@ -375,12 +377,8 @@ public actor StubActionExecutor: ActionExecutor {
     }
 
     public func setPaused(_ paused: Bool) {
+        // See LocalPilotActionExecutor.setPaused: pause must not flip `enabled`.
         self.paused = paused
-        if paused {
-            enabled = false
-        } else {
-            enabled = true
-        }
     }
 }
 

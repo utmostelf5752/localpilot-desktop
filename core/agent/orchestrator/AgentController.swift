@@ -22,6 +22,11 @@ public final class AgentController {
     public private(set) var pendingApproval: PendingApproval?
     /// Live event log for the in-progress task, shown by the Activity view.
     public private(set) var currentTaskEvents: [LocalEvent] = []
+    /// Live token stream for the in-progress planning call, shown by the chat as
+    /// the model is thinking. Reset at the start of each planning turn.
+    public private(set) var isStreaming = false
+    public private(set) var liveReasoning = ""
+    public private(set) var liveTokenCount = 0
 
     /// Persisted past-task transcripts, surfaced in the Tasks list.
     @ObservationIgnored public let taskSessionStore: TaskSessionStore
@@ -34,6 +39,7 @@ public final class AgentController {
     @ObservationIgnored private weak var modelSessionCloser: ModelSessionClosing?
     @ObservationIgnored private let useModelLoop: Bool
     @ObservationIgnored private var actionLoop: Task<Void, Never>?
+    @ObservationIgnored private var testTask: Task<Void, Never>?
     @ObservationIgnored private var activeTaskID: UUID?
     @ObservationIgnored private var approvalDecision: ApprovalDecision?
     @ObservationIgnored private var history = AgentHistory()
@@ -105,6 +111,29 @@ public final class AgentController {
         }
     }
 
+    /// Clears the chat back to a fresh state for a new task. Stops any in-flight
+    /// run first. Past sessions remain in the Tasks list (already persisted).
+    public func newTask() {
+        stopLoopOnly()
+        Task { await executor.stopImmediately() }
+        closeModelsIfNeeded()
+        activeTaskID = nil
+        currentTaskEvents = []
+        recentLogSnippets = []
+        isStreaming = false
+        liveReasoning = ""
+        liveTokenCount = 0
+        state = LocalPilotState.empty
+        runStatus = .idle
+        overlayState = .idle
+        executorEnabled = false
+        currentActionLabel = "Idle"
+        messages = [
+            ChatMessage(role: .system, text: "LocalPilot Desktop is ready. Enter a task to start a guarded fake run.")
+        ]
+        sessionMessageStartIndex = 0
+    }
+
     public func pause() {
         guard runStatus == .running else { return }
         runStatus = .paused
@@ -140,6 +169,7 @@ public final class AgentController {
         runStatus = .stopped
         overlayState = .idle
         executorEnabled = false
+        isStreaming = false
         currentActionLabel = "Stopped"
         state.status = .stopped
         stopLoopOnly()
@@ -199,21 +229,27 @@ public final class AgentController {
     public func testModelRuntimeConnection(using settingsOverride: AppSettings? = nil) {
         let settings = settingsOverride ?? settings
         providerStatus = "Loading model into memory..."
-        Task {
-            let provider = makePlannerProvider(settings: settings, runtime: ProcessManagedModelRuntime())
+        // Cancel any in-flight test so repeated clicks don't trigger overlapping
+        // model loads that race on `providerStatus`.
+        testTask?.cancel()
+        testTask = Task { [weak self] in
+            guard let self else { return }
+            let provider = self.makePlannerProvider(settings: settings, runtime: ProcessManagedModelRuntime())
             do {
                 try await provider.healthCheck()
-                _ = try await provider.complete(prompt: "ping", system: nil, format: nil)
-                try? await provider.closeModel()
+                // Load then release in one shot: a 1-token generation plus
+                // runtime eviction, so the test doesn't burn a full response or
+                // leave the model resident.
+                try await provider.warmupAndRelease()
                 await MainActor.run {
-                    providerStatus = "Model loaded and unloaded OK"
-                    appendLog(providerStatus)
+                    self.providerStatus = "Model loaded and unloaded OK"
+                    self.appendLog(self.providerStatus)
                 }
             } catch {
                 try? await provider.closeModel()
                 await MainActor.run {
-                    providerStatus = "Connection failed: \(error.localizedDescription)"
-                    appendLog(providerStatus)
+                    self.providerStatus = "Connection failed: \(error.localizedDescription)"
+                    self.appendLog(self.providerStatus)
                 }
             }
         }
@@ -222,10 +258,23 @@ public final class AgentController {
     private func runAgentLoop(task: String) async {
         let runtime = ProcessManagedModelRuntime()
         let plannerProvider = makePlannerProvider(settings: settings, runtime: runtime)
-        let guardProvider = makeGuardProvider(settings: settings, runtime: runtime)
+        // [#1 keep model resident] On prompt-driven backends (LM Studio / Ollama /
+        // API) the provider's behavior comes entirely from the prompt + schema, so
+        // when the guard uses the same model name we reuse the planner provider.
+        // That stops the server from evicting/reloading to swap planner<->guard
+        // models every risky turn — the dominant per-turn cost on local hardware.
+        // Internal/managed providers differ by role, so they are never shared.
+        let promptDrivenBackend: Bool
+        switch settings.modelProviderMode {
+        case .lmStudio, .ollama, .apiProvider: promptDrivenBackend = true
+        case .internalInProcess, .managedRuntime: promptDrivenBackend = false
+        }
+        let guardSharesPlanner = promptDrivenBackend
+            && settings.guardConfiguration().modelName == settings.plannerConfiguration().modelName
+        let guardProvider = guardSharesPlanner ? plannerProvider : makeGuardProvider(settings: settings, runtime: runtime)
         if let manager = modelSessionCloser as? ModelSessionManager {
             manager.register(plannerProvider)
-            manager.register(guardProvider)
+            if !guardSharesPlanner { manager.register(guardProvider) }
         }
 
         let planner = JSONActionPlanner(provider: plannerProvider, structuredOutput: settings.useStructuredDecoding)
@@ -255,6 +304,11 @@ public final class AgentController {
             let maxPlan = 6
             var executedActions = 0
 
+            // [#2 send everything every turn] Append-only transcript (text only,
+            // no image) sent to the planner each turn. A stable, growing prefix
+            // lets the server reuse its KV cache instead of re-prefilling.
+            var transcript = "Task: \(task)"
+
             planningRounds: while executedActions < maxActions {
                 guard !Task.isCancelled, runStatus == .running else { return }
                 await waitIfPaused()
@@ -262,30 +316,40 @@ public final class AgentController {
 
                 currentActionLabel = "Observing screen"
                 context = await contextBuilder.makeContext(settings: settings, task: task, history: history)
-                state.lastObservationSummary = context.visibleText.components(separatedBy: "\n").last ?? ""
-                if compactor.shouldCompact(estimatedTokens: compactor.estimateTokens(context.visibleText)) {
-                    log(event: "context_compacted", detail: "Context kept lean: rolling summary plus recent step tail.")
-                }
+                state.lastObservationSummary = context.observationSummary
                 log(event: "screen_observed", detail: state.lastObservationSummary)
+
+                // Append this turn's screen, then send the whole transcript.
+                transcript += "\n\n[Screen]\n\(context.observationSummary)"
 
                 currentActionLabel = "Planning"
                 log(event: "planning", detail: "Requesting next action plan")
 
+                isStreaming = true
+                liveReasoning = ""
+                liveTokenCount = 0
                 let plan = try await planner.proposeActions(
-                    originalTask: task,
-                    context: context,
-                    recentMessages: messages,
-                    maxActions: maxPlan
+                    prompt: transcriptWithinBudget(transcript),
+                    maxActions: maxPlan,
+                    onDelta: { [weak self] delta in
+                        Task { @MainActor in
+                            guard let self else { return }
+                            if !delta.reasoning.isEmpty { self.liveReasoning += delta.reasoning }
+                            self.liveTokenCount += 1
+                        }
+                    }
                 )
-                if plan.count > 1 {
-                    log(event: "plan_proposed", detail: "Planner proposed \(plan.count) actions; each is gated and executed one at a time.")
+                isStreaming = false
+                let actions = plan.actions
+                if actions.count > 1 {
+                    log(event: "plan_proposed", detail: "Planner proposed \(actions.count) actions; each is gated and executed one at a time.")
                 }
 
                 // Execute the planned actions one at a time. Each is independently
                 // re-validated and remains interruptible; we re-observe between
                 // steps and abandon the rest of the plan to re-plan if a step
                 // fails or the screen no longer matches.
-                for (index, action) in plan.enumerated() {
+                for (index, action) in actions.enumerated() {
                     guard executedActions < maxActions else { break planningRounds }
                     guard !Task.isCancelled, runStatus == .running else { return }
                     await waitIfPaused()
@@ -299,7 +363,9 @@ public final class AgentController {
                     }
 
                     let turnScreenshot = saveTurnScreenshot(context.latestScreenshotPNGBase64)
-                    messages.append(ChatMessage(role: .agent, text: "Proposed `\(action.type.rawValue)`: \(action.expectedResult)", screenshotPath: turnScreenshot))
+                    // Attach the model's reasoning to the first action of the plan
+                    // (it reasoned about the whole plan at once, not per action).
+                    messages.append(ChatMessage(role: .agent, text: "Proposed `\(action.type.rawValue)`: \(action.expectedResult)", reasoning: index == 0 ? plan.reasoning : nil, screenshotPath: turnScreenshot))
                     currentActionLabel = "Policy check: \(action.type.rawValue)"
 
                     let policy = policyEngine.classify(action: action, context: context)
@@ -344,6 +410,10 @@ public final class AgentController {
                     state.completedSteps.append(action.type.rawValue)
                     state.lastActionResult = result
                     history.record("\(action.type.rawValue): \(result)", compactor: compactor, maxRecent: 4)
+                    // Record the chosen action + its result so the next turn's
+                    // prompt carries it (append-only, keeps the prefix stable).
+                    let actionJSON = (try? JSONEncoder().encode(action)).flatMap { String(data: $0, encoding: .utf8) } ?? action.type.rawValue
+                    transcript += "\n[Action] \(actionJSON)\n[Result] \(result)"
                     appendLog(result)
                     log(event: "executor_result", detail: result)
 
@@ -494,12 +564,29 @@ public final class AgentController {
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             turnScreenshotIndex += 1
-            let url = dir.appending(path: "turn-\(turnScreenshotIndex).png")
+            let url = dir.appending(path: "turn-\(turnScreenshotIndex).jpg")
             try data.write(to: url, options: .atomic)
             return url.path
         } catch {
             return nil
         }
+    }
+
+    /// Keeps the transcript under a rough token budget so a long run can't
+    /// overflow the model's context. Keeps the task header plus the most recent
+    /// turns and drops the oldest middle.
+    /// ponytail: ~4 chars/token estimate; refine only if it misjudges in practice.
+    private func transcriptWithinBudget(_ transcript: String) -> String {
+        let budgetChars = max(8_000, settings.contextWindowSize * 4)
+        guard transcript.count > budgetChars else { return transcript }
+        let header = transcript.prefix(while: { $0 != "\n" })
+        let marker = "\n[...earlier turns dropped to fit context...]\n"
+        // Reserve room for header + marker so the whole result stays under budget;
+        // suffix(budgetChars) alone only bounds the tail, letting a long header
+        // push the total over the limit.
+        let tailBudget = max(0, budgetChars - header.count - marker.count)
+        let tail = transcript.suffix(tailBudget)
+        return header + marker + tail
     }
 
     private func closeModelsIfNeeded() {

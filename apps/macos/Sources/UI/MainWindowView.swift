@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct MainWindowView: View {
@@ -21,6 +22,16 @@ struct MainWindowView: View {
                 TasksView(controller: controller)
             case .settings:
                 SettingsView(controller: controller)
+            }
+        }
+        .background(WindowAccessor { MainWindowPlacement.shared.adopt($0) })
+        // Shrink the main window to a compact top-right panel while a task runs
+        // (like agent mode), and restore it when the run ends.
+        .onChange(of: isTaskActive) { _, active in
+            if active {
+                MainWindowPlacement.shared.enterAgentMode()
+            } else {
+                MainWindowPlacement.shared.exitAgentMode()
             }
         }
         .onAppear {
@@ -76,6 +87,10 @@ struct MainWindowView: View {
         }
     }
 
+    private var isTaskActive: Bool {
+        controller.runStatus == .running || controller.runStatus == .paused
+    }
+
     /// The overlay should be visible whenever the agent is in a non-idle overlay
     /// state, EXCEPT while an approval is pending: in that case the main-window
     /// approval sheet must be reachable, and the full-screen overlay would cover
@@ -96,6 +111,56 @@ struct MainWindowView: View {
             return .pause
         }
         return nil
+    }
+}
+
+/// Reports the hosting `NSWindow` once SwiftUI attaches the view to a window, so
+/// non-SwiftUI window placement (resize/move) can be driven from view state.
+private struct WindowAccessor: NSViewRepresentable {
+    let onResolve: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { if let window = view.window { onResolve(window) } }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { if let window = nsView.window { onResolve(window) } }
+    }
+}
+
+/// Drives the main window between its normal frame and a compact top-right
+/// "agent mode" panel. Saves the pre-shrink frame so it can be restored exactly.
+@MainActor
+final class MainWindowPlacement {
+    static let shared = MainWindowPlacement()
+
+    private weak var window: NSWindow?
+    private var savedFrame: NSRect?
+
+    private init() {}
+
+    func adopt(_ window: NSWindow) {
+        self.window = window
+    }
+
+    func enterAgentMode() {
+        guard let window, let screen = window.screen ?? NSScreen.main else { return }
+        if savedFrame == nil { savedFrame = window.frame }
+        let size = NSSize(width: 460, height: 720)
+        let visible = screen.visibleFrame
+        let origin = NSPoint(
+            x: visible.maxX - size.width - 16,
+            y: visible.maxY - size.height - 16
+        )
+        window.setFrame(NSRect(origin: origin, size: size), display: true, animate: true)
+    }
+
+    func exitAgentMode() {
+        guard let window, let saved = savedFrame else { return }
+        window.setFrame(saved, display: true, animate: true)
+        savedFrame = nil
     }
 }
 

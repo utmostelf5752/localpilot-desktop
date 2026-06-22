@@ -31,6 +31,11 @@ actor StubTextProvider: LocalModelProvider {
     }
 }
 
+actor DeltaCollector {
+    private(set) var combinedReasoning = ""
+    func append(_ delta: StreamDelta) { combinedReasoning += delta.reasoning }
+}
+
 actor ScriptedGuard: GuardModel {
     let decision: GuardDecision
     let delay: Duration
@@ -130,11 +135,33 @@ struct PlannerGuardTests {
         ])
         let planner = JSONActionPlanner(provider: provider)
 
-        let actions = try await planner.proposeActions(originalTask: "do it", context: .empty, recentMessages: [])
+        let actions = try await planner.proposeActions(originalTask: "do it", context: .empty, recentMessages: []).actions
 
         #expect(actions.count == 2)
         #expect(actions.first?.type == .observe)
         #expect(actions.last?.type == .finish)
+    }
+
+    @Test
+    func streamingPlannerDecodesAndForwardsReasoningDelta() async throws {
+        // The stub only implements `complete`, so it exercises the protocol's
+        // default `completeStreaming` fallback: one delta carrying the split-off
+        // reasoning, and a plan decoded identically to the non-streaming path.
+        let provider = StubTextProvider(completions: [
+            #"<think>weighing options</think>{"type":"finish","target_kind":"task","target_text":"task","expected_result":"done","risk_level":"low","reason":"complete"}"#
+        ])
+        let planner = JSONActionPlanner(provider: provider)
+
+        let deltas = DeltaCollector()
+        let plan = try await planner.proposeActions(prompt: "do it") { delta in
+            Task { await deltas.append(delta) }
+        }
+
+        #expect(plan.actions.first?.type == .finish)
+        #expect(plan.reasoning == "weighing options")
+        // Give the detached delta task a beat to land before asserting.
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await deltas.combinedReasoning == "weighing options")
     }
 
     @Test
@@ -144,7 +171,7 @@ struct PlannerGuardTests {
         ])
         let planner = JSONActionPlanner(provider: provider)
 
-        let actions = try await planner.proposeActions(originalTask: "wait", context: .empty, recentMessages: [])
+        let actions = try await planner.proposeActions(originalTask: "wait", context: .empty, recentMessages: []).actions
 
         #expect(actions.count == 1)
         #expect(actions.first?.type == .wait)
@@ -157,7 +184,7 @@ struct PlannerGuardTests {
         let provider = StubTextProvider(completions: ["{\"actions\":[\(items)]}"])
         let planner = JSONActionPlanner(provider: provider)
 
-        let actions = try await planner.proposeActions(originalTask: "t", context: .empty, recentMessages: [], maxActions: 3)
+        let actions = try await planner.proposeActions(originalTask: "t", context: .empty, recentMessages: [], maxActions: 3).actions
 
         #expect(actions.count == 3)
     }

@@ -14,7 +14,9 @@ struct LocalPilotDesktopApp: App {
     var body: some Scene {
         WindowGroup {
             MainWindowView(controller: controller)
-                .frame(minWidth: 1080, minHeight: 720)
+                // Keep the floor low enough that the window can shrink to the
+                // compact agent-mode panel (460pt) and fit on small displays.
+                .frame(minWidth: 460, minHeight: 480)
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)

@@ -22,6 +22,17 @@ public struct StubPlannerModel: PlannerModel {
     public func cancel() async {}
 }
 
+/// A planned set of actions plus the model's reasoning, if it emitted any.
+public struct PlannedActions: Sendable {
+    public let actions: [StructuredAction]
+    public let reasoning: String?
+
+    public init(actions: [StructuredAction], reasoning: String?) {
+        self.actions = actions
+        self.reasoning = reasoning
+    }
+}
+
 public struct JSONActionPlanner: Sendable {
     private let provider: any LocalModelProvider
     private let structuredOutput: Bool
@@ -38,25 +49,61 @@ public struct JSONActionPlanner: Sendable {
             system: Self.systemPrompt,
             format: structuredOutput ? .jsonSchema(name: "localpilot_action", schema: StructuredOutputSchema.action) : .json
         )
-        let data = Data(response.utf8)
-        return try decoder.decode(StructuredAction.self, from: data)
+        let payload = lpExtractJSONPayload(lpSplitReasoning(response).content)
+        return try decoder.decode(StructuredAction.self, from: Data(payload.utf8))
     }
 
     /// Propose an ordered plan of up to `maxActions` actions. The model may
     /// return either a single action object or `{"actions":[...]}`. Either way
-    /// the orchestrator gates and executes each action one at a time.
+    /// the orchestrator gates and executes each action one at a time. Reasoning
+    /// models' chain-of-thought is split off and returned alongside the actions.
     public func proposeActions(
         originalTask: String,
         context: AgentContext,
         recentMessages: [ChatMessage],
         maxActions: Int = 6
-    ) async throws -> [StructuredAction] {
+    ) async throws -> PlannedActions {
         let response = try await provider.complete(
             prompt: plannerPrompt(originalTask: originalTask, context: context, recentMessages: recentMessages),
             system: Self.planSystemPrompt,
             format: structuredOutput ? .jsonSchema(name: "localpilot_plan", schema: StructuredOutputSchema.plan) : .json
         )
-        let data = Data(response.utf8)
+        return try decodePlan(response, maxActions: maxActions)
+    }
+
+    /// Sends a caller-built prompt verbatim — the agent loop passes the entire
+    /// running transcript (text only, no image) here every turn. Shipping the
+    /// full history as a stable, append-only prefix lets the inference server
+    /// reuse its KV cache instead of re-prefilling everything each turn.
+    public func proposeActions(prompt: String, maxActions: Int = 6) async throws -> PlannedActions {
+        let response = try await provider.complete(
+            prompt: prompt,
+            system: Self.planSystemPrompt,
+            format: structuredOutput ? .jsonSchema(name: "localpilot_plan", schema: StructuredOutputSchema.plan) : .json
+        )
+        return try decodePlan(response, maxActions: maxActions)
+    }
+
+    /// Streaming variant of `proposeActions(prompt:)`: forwards live token deltas
+    /// to `onDelta` while the model generates, then decodes the full response the
+    /// same way. Falls back to a single delta on providers that can't stream.
+    public func proposeActions(
+        prompt: String,
+        maxActions: Int = 6,
+        onDelta: @escaping @Sendable (StreamDelta) -> Void
+    ) async throws -> PlannedActions {
+        let response = try await provider.completeStreaming(
+            prompt: prompt,
+            system: Self.planSystemPrompt,
+            format: structuredOutput ? .jsonSchema(name: "localpilot_plan", schema: StructuredOutputSchema.plan) : .json,
+            onDelta: onDelta
+        )
+        return try decodePlan(response, maxActions: maxActions)
+    }
+
+    private func decodePlan(_ response: String, maxActions: Int) throws -> PlannedActions {
+        let split = lpSplitReasoning(response)
+        let data = Data(lpExtractJSONPayload(split.content).utf8)
 
         let actions: [StructuredAction]
         if let plan = try? decoder.decode(ActionPlan.self, from: data) {
@@ -71,7 +118,7 @@ public struct JSONActionPlanner: Sendable {
         guard !bounded.isEmpty else {
             throw PlannerError.emptyPlan
         }
-        return bounded
+        return PlannedActions(actions: bounded, reasoning: split.reasoning)
     }
 
     private func plannerPrompt(originalTask: String, context: AgentContext, recentMessages: [ChatMessage]) -> String {

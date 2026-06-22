@@ -121,6 +121,9 @@ public struct AgentContext: Codable, Equatable, Sendable {
     public var allowedFolders: Set<String>
     public var visibleText: String
     public var activeFieldKind: String?
+    /// This turn's screen rendered as text (app, window, AX summary, elements).
+    /// The agent loop appends this to the running transcript each turn.
+    public var observationSummary: String = ""
     /// Latest screen capture for this observation, retained so the UI can show a
     /// per-turn thumbnail in task history. Never fed into the model prompt.
     public var latestScreenshotPNGBase64: String? = nil

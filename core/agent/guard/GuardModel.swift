@@ -39,7 +39,8 @@ public struct JSONGuardModel: GuardModel {
             system: Self.systemPrompt,
             format: .jsonSchema(name: "localpilot_guard", schema: StructuredOutputSchema.guardDecision)
         )
-        return try decoder.decode(GuardDecision.self, from: Data(response.utf8))
+        let payload = lpExtractJSONPayload(lpSplitReasoning(response).content)
+        return try decoder.decode(GuardDecision.self, from: Data(payload.utf8))
     }
 
     public func cancel() async {

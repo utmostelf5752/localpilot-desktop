@@ -4,6 +4,12 @@ struct ChatPanelView: View {
     @Bindable var controller: AgentController
     @Binding var taskText: String
 
+    private let liveActivityID = "live-activity"
+
+    private var isActive: Bool {
+        controller.runStatus == .running || controller.runStatus == .paused
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -15,6 +21,14 @@ struct ChatPanelView: View {
                             ChatBubbleView(message: message)
                                 .id(message.id)
                         }
+                        if controller.isStreaming && controller.runStatus == .running {
+                            LiveActivityCard(
+                                label: controller.currentActionLabel,
+                                reasoning: controller.liveReasoning,
+                                tokens: controller.liveTokenCount
+                            )
+                            .id(liveActivityID)
+                        }
                     }
                     .padding(24)
                 }
@@ -24,6 +38,9 @@ struct ChatPanelView: View {
                             proxy.scrollTo(last.id, anchor: .bottom)
                         }
                     }
+                }
+                .onChange(of: controller.liveTokenCount) { _, _ in
+                    proxy.scrollTo(liveActivityID, anchor: .bottom)
                 }
             }
             Divider()
@@ -41,18 +58,33 @@ struct ChatPanelView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Button {
+                controller.newTask()
+                taskText = ""
+            } label: {
+                Label("New task", systemImage: "square.and.pencil")
+            }
+            .disabled(controller.runStatus == .running || controller.runStatus == .paused)
             StatusPill(status: controller.runStatus)
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
     }
 
+    @ViewBuilder
     private var composer: some View {
+        if isActive {
+            activeControls
+        } else {
+            inputControls
+        }
+    }
+
+    private var inputControls: some View {
         HStack(alignment: .bottom, spacing: 12) {
             TextField("Ask LocalPilot to do a task...", text: $taskText, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(2...5)
-                .disabled(controller.runStatus == .running || controller.runStatus == .paused)
 
             Button {
                 controller.start(task: taskText)
@@ -61,7 +93,22 @@ struct ChatPanelView: View {
                 Label("Start", systemImage: "play.fill")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(taskText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || controller.runStatus == .running || controller.runStatus == .paused)
+            .disabled(taskText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .padding(18)
+    }
+
+    // While a task runs the composer becomes a live status line plus Pause/Resume
+    // and Stop controls, mirroring agent mode.
+    private var activeControls: some View {
+        HStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.small)
+            Text(controller.currentActionLabel)
+                .font(.callout.weight(.medium))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 8)
 
             if controller.runStatus == .running {
                 Button {
@@ -69,17 +116,65 @@ struct ChatPanelView: View {
                 } label: {
                     Label("Pause", systemImage: "pause.fill")
                 }
+            } else {
+                Button {
+                    controller.continueTask(instruction: "")
+                } label: {
+                    Label("Resume", systemImage: "play.fill")
+                }
+                .buttonStyle(.borderedProminent)
             }
 
-            if controller.runStatus == .running || controller.runStatus == .paused {
-                Button(role: .destructive) {
-                    controller.stop()
-                } label: {
-                    Label("Stop", systemImage: "stop.fill")
-                }
+            Button(role: .destructive) {
+                controller.stop()
+            } label: {
+                Label("Stop", systemImage: "stop.fill")
             }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
         }
         .padding(18)
+    }
+}
+
+private struct LiveActivityCard: View {
+    let label: String
+    let reasoning: String
+    let tokens: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(label)
+                    .font(.caption.weight(.semibold))
+                Spacer(minLength: 8)
+                if tokens > 0 {
+                    Text("\(tokens) tokens")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if !reasoning.isEmpty {
+                ScrollView {
+                    Text(reasoning)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(maxHeight: 180)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.accentColor.opacity(0.3))
+        )
     }
 }
 
@@ -106,6 +201,17 @@ private struct ChatBubbleView: View {
                 .foregroundStyle(.secondary)
                 Text(message.text)
                     .textSelection(.enabled)
+                if let reasoning = message.reasoning, !reasoning.isEmpty {
+                    DisclosureGroup("Reasoning") {
+                        Text(reasoning)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                }
             }
             .padding(12)
             .background(background)

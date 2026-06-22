@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Redesigned Settings screen. Holds a working `draft` copy of `AppSettings`;
@@ -8,12 +9,16 @@ struct SettingsView: View {
     // Working copy. Seeded once from controller.settings in onAppear so that
     // edits are local until an explicit Save. `loaded` guards the one-time seed.
     @State private var draft: AppSettings = .defaultValue
-    @State private var loaded = false
 
     // Model discovery state.
     @State private var models: [String] = []
-    @State private var discoveryError = false
+    @State private var discoveryState: DiscoveryState = .ok
     @State private var detectedContext: Int?
+
+    // Distinguishes an unreachable server from a reachable one that simply has
+    // no models, so the UI stops reporting a running Ollama/LM Studio as "not
+    // detected" when the real problem is an empty model list.
+    private enum DiscoveryState { case ok, unreachable, empty }
 
     // Permission rows are informational/read-only.
     private let permissionRows: [PermissionSummary] = [
@@ -43,20 +48,21 @@ struct SettingsView: View {
             }
         }
         .onAppear {
-            if !loaded {
-                draft = controller.settings
-                loaded = true
-            }
+            // Re-seed from the controller every appearance so quick edits made in
+            // the inspector panel are reflected here. Settings and the inspector
+            // are never on screen at once (separate sidebar tabs), so this can't
+            // clobber edits being made elsewhere.
+            draft = controller.settings
             refreshDiscovery()
             refreshDetectedContext()
         }
         .onChange(of: draft.modelProviderMode) { _, _ in
             refreshDiscovery()
-            refreshDetectedContext()
+            refreshDetectedContext(snapToNative: true)
         }
         .onChange(of: draft.ollamaBaseURL) { _, _ in refreshDiscovery() }
         .onChange(of: draft.lmStudioBaseURL) { _, _ in refreshDiscovery() }
-        .onChange(of: draft.plannerModel) { _, _ in refreshDetectedContext() }
+        .onChange(of: draft.plannerModel) { _, _ in refreshDetectedContext(snapToNative: true) }
     }
 
     // MARK: - Model
@@ -80,11 +86,17 @@ struct SettingsView: View {
             case .ollama:
                 TextField("Ollama base URL", text: urlBinding(\.ollamaBaseURL))
                     .textFieldStyle(.roundedBorder)
-                discoveryArea(notRunning: "Ollama not detected — make sure the Ollama app is running, then Recheck.")
+                discoveryArea(
+                    notRunning: "Ollama not detected — make sure the Ollama app is running, then Recheck.",
+                    noModels: "Ollama is running but has no models. Pull one first, e.g. `ollama pull llama3.2`, then Recheck."
+                )
             case .lmStudio:
                 TextField("LM Studio base URL", text: urlBinding(\.lmStudioBaseURL))
                     .textFieldStyle(.roundedBorder)
-                discoveryArea(notRunning: "LM Studio not detected — open LM Studio and start its local server, then Recheck.")
+                discoveryArea(
+                    notRunning: "LM Studio not detected — open LM Studio and start its local server (Developer tab → Start Server), then Recheck.",
+                    noModels: "LM Studio server is running but no model is loaded. Load a model in LM Studio, then Recheck."
+                )
             default:
                 EmptyView()
             }
@@ -104,7 +116,7 @@ struct SettingsView: View {
     }
 
     @ViewBuilder
-    private func discoveryArea(notRunning: String) -> some View {
+    private func discoveryArea(notRunning: String, noModels: String) -> some View {
         // Planner model picker.
         Picker("Planner model", selection: $draft.plannerModel) {
             ForEach(modelOptions(including: draft.plannerModel), id: \.self) { name in
@@ -123,10 +135,17 @@ struct SettingsView: View {
 
         HStack {
             Button("Recheck") { refreshDiscovery() }
-            if discoveryError {
+            switch discoveryState {
+            case .unreachable:
                 Text(notRunning)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            case .empty:
+                Text(noModels)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .ok:
+                EmptyView()
             }
         }
     }
@@ -178,7 +197,9 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Slider(
                     value: contextWindowBinding,
-                    in: 1024...Double(contextUpperBound),
+                    // max(1024, …): a detected native window below 1024 would make
+                    // the lower bound exceed the upper bound and crash the Slider.
+                    in: 1024...Double(max(1024, contextUpperBound)),
                     step: 1024
                 )
                 Text(contextWindowLabel)
@@ -242,12 +263,21 @@ struct SettingsView: View {
                 .textFieldStyle(.roundedBorder)
 
             ForEach(permissionRows, id: \.permission.rawValue) { row in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(row.permission.rawValue)
-                        .font(.subheadline.weight(.semibold))
-                    Text(row.requiredFor)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(row.permission.rawValue)
+                            .font(.subheadline.weight(.semibold))
+                        Text(row.requiredFor)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    if let url = row.permission.systemSettingsURL {
+                        Button("Open Settings") { NSWorkspace.shared.open(url) }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .fixedSize()
+                    }
                 }
                 .padding(.vertical, 2)
             }
@@ -259,7 +289,7 @@ struct SettingsView: View {
     private func refreshDiscovery() {
         guard draft.modelProviderMode.supportsModelDiscovery else {
             models = []
-            discoveryError = false
+            discoveryState = .ok
             return
         }
         let mode = draft.modelProviderMode
@@ -273,15 +303,27 @@ struct SettingsView: View {
                     lmStudioBaseURL: lmStudio
                 )
                 models = found
-                discoveryError = found.isEmpty
+                discoveryState = found.isEmpty ? .empty : .ok
+                // Replace a stale/placeholder selection (e.g. the "planner.gguf"
+                // default) with a real discovered model, so the picker shows an
+                // actual model instead of a name the server doesn't have.
+                if let first = found.first {
+                    if !found.contains(draft.plannerModel) { draft.plannerModel = first }
+                    if !found.contains(draft.guardModel) { draft.guardModel = first }
+                }
             } catch {
                 models = []
-                discoveryError = true
+                discoveryState = .unreachable
             }
         }
     }
 
-    private func refreshDetectedContext() {
+    /// Detects the selected model's native context window and updates the budget.
+    /// - `snapToNative: true` (model/provider changed): set the budget to the new
+    ///   model's full window so the "tokens" value tracks the chosen model.
+    /// - `snapToNative: false` (settings just opened): only clamp down, so a
+    ///   smaller budget the user saved earlier is preserved.
+    private func refreshDetectedContext(snapToNative: Bool = false) {
         guard draft.modelProviderMode.supportsModelDiscovery else {
             detectedContext = nil
             return
@@ -299,9 +341,9 @@ struct SettingsView: View {
             )
             detectedContext = native
             if let native {
-                // Clamp the budget to the model's native window so the slider
-                // can never exceed what the model actually supports.
-                draft.contextWindowSize = min(draft.contextWindowSize, native)
+                draft.contextWindowSize = snapToNative
+                    ? native
+                    : min(draft.contextWindowSize, native)
             }
         }
     }

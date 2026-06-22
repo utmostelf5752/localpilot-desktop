@@ -6,8 +6,8 @@ import SwiftUI
 /// (220pt) and shows only the few things worth glancing at while a task runs,
 /// plus the handful of controls worth flipping quickly.
 ///
-/// Editing `controller.settings` here applies live to the *next* run by design,
-/// so we deliberately do NOT call `saveSettings` from this quick-control panel.
+/// Editing `controller.settings` here applies to the *next* run, and is persisted
+/// (see `.onChange` below) so the Settings screen and a relaunch stay in sync.
 struct TaskInspectorView: View {
     @Bindable var controller: AgentController
 
@@ -65,6 +65,11 @@ struct TaskInspectorView: View {
         .padding(14)
         .frame(width: 220)
         .background(Color(nsColor: .controlBackgroundColor))
+        // Persist quick-control edits so they survive relaunch and the Settings
+        // screen reflects them. Applies to the next run, not the in-flight one.
+        .onChange(of: controller.settings) { _, _ in
+            controller.saveSettings()
+        }
     }
 
     /// Color cue for the run status value: active states read positive, halted

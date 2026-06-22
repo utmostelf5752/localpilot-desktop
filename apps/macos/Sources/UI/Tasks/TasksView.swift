@@ -16,18 +16,36 @@ struct TasksView: View {
     @State private var searchText = ""
 
     var body: some View {
-        NavigationSplitView {
+        // A plain two-pane HSplitView, NOT a nested NavigationSplitView. This
+        // view is already rendered inside the main window's NavigationSplitView
+        // detail column; nesting a second NavigationSplitView there is
+        // unsupported by SwiftUI and renders the whole screen broken (blank /
+        // collapsed columns). HSplitView gives the same draggable master-detail
+        // without the nesting.
+        HSplitView {
             sessionList
-                .navigationTitle("Tasks")
-        } detail: {
+                .frame(minWidth: 240, idealWidth: 300, maxWidth: 460)
             detail
+                .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Master list
 
     private var sessionList: some View {
-        Group {
+        VStack(spacing: 0) {
+            // Manual search field: `.searchable` only renders inside a navigation
+            // container, which we deliberately no longer have here.
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Search tasks", text: $searchText)
+                    .textFieldStyle(.plain)
+            }
+            .padding(8)
+            Divider()
+
             if controller.taskSessionStore.active.isEmpty {
                 ContentUnavailableView(
                     "No past tasks yet.",
@@ -57,8 +75,7 @@ struct TasksView: View {
                 .listStyle(.sidebar)
             }
         }
-        .searchable(text: $searchText, placement: .sidebar, prompt: "Search tasks")
-        .frame(minWidth: 260)
+        .frame(maxHeight: .infinity)
     }
 
     /// Active sessions filtered by the search field. The store already returns

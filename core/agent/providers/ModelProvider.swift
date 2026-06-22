@@ -33,18 +33,89 @@ public struct ModelProviderConfiguration: Codable, Equatable, Sendable {
     }
 }
 
+/// One streamed increment: the new content and/or reasoning tokens that arrived
+/// in a single chunk. Either field may be empty.
+public struct StreamDelta: Sendable, Equatable {
+    public var content: String
+    public var reasoning: String
+
+    public init(content: String = "", reasoning: String = "") {
+        self.content = content
+        self.reasoning = reasoning
+    }
+}
+
 public protocol LocalModelProvider: Sendable {
     var configuration: ModelProviderConfiguration { get }
     func complete(prompt: String, system: String?, format: ModelResponseFormat?) async throws -> String
+    /// Streams generation, calling `onDelta` as content/reasoning tokens arrive,
+    /// and returns the full raw output (reasoning embedded as `<think>...`), so
+    /// callers can decode it exactly as the non-streaming `complete` result.
+    /// Default implementation falls back to one non-streamed completion.
+    func completeStreaming(
+        prompt: String,
+        system: String?,
+        format: ModelResponseFormat?,
+        onDelta: @escaping @Sendable (StreamDelta) -> Void
+    ) async throws -> String
     func healthCheck() async throws
     func cancel() async
     func closeModel() async throws
+    /// Loads the model into memory with a negligible generation, then asks the
+    /// runtime to release it. Used by the connection test so it neither burns a
+    /// full generation ("using tokens for no reason") nor leaves the model
+    /// resident. Default does a plain ping + closeModel; local providers override
+    /// to cap output and force eviction.
+    func warmupAndRelease() async throws
 }
 
 public extension LocalModelProvider {
     func complete(prompt: String) async throws -> String {
         try await complete(prompt: prompt, system: nil, format: nil)
     }
+
+    func completeStreaming(
+        prompt: String,
+        system: String?,
+        format: ModelResponseFormat?,
+        onDelta: @escaping @Sendable (StreamDelta) -> Void
+    ) async throws -> String {
+        let raw = try await complete(prompt: prompt, system: system, format: format)
+        let split = lpSplitReasoning(raw)
+        onDelta(StreamDelta(content: split.content, reasoning: split.reasoning ?? ""))
+        return raw
+    }
+
+    func warmupAndRelease() async throws {
+        _ = try await complete(prompt: "ping", system: nil, format: nil)
+        try await closeModel()
+    }
+}
+
+/// Opens a streaming POST and returns the response byte stream once the status is
+/// known to be OK. Bypasses the injected `HTTPClient` (which is buffered) — live
+/// streaming always uses `URLSession` directly.
+/// ponytail: real URLSession only; streaming is not exercised by fake-client tests.
+func lpOpenStreamingPOST(
+    url: URL,
+    headers: [String: String],
+    body: Data,
+    timeoutSeconds: TimeInterval
+) async throws -> URLSession.AsyncBytes {
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.httpBody = body
+    for (key, value) in headers {
+        request.setValue(value, forHTTPHeaderField: key)
+    }
+    if timeoutSeconds > 0 {
+        request.timeoutInterval = timeoutSeconds
+    }
+    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+    if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+        throw ModelProviderError.badStatus(http.statusCode, "")
+    }
+    return bytes
 }
 
 public enum InternalModelRole: Sendable {
@@ -113,11 +184,19 @@ public actor InternalLocalModelProvider: LocalModelProvider {
     }
 
     private static func originalTask(from prompt: String) -> String {
-        guard let start = prompt.range(of: "Original task:")?.upperBound,
-              let end = prompt.range(of: "Current context:")?.lowerBound else {
-            return prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The live loop sends "Task: <text>\n\n[Screen]...". Extract the task
+        // line so prefix matching ("open ...", "click ...") works on just the
+        // user's instruction, not the whole transcript.
+        if let start = prompt.range(of: "Task:")?.upperBound {
+            let rest = prompt[start...]
+            let end = rest.firstIndex(of: "\n") ?? rest.endIndex
+            return String(rest[..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        return String(prompt[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let start = prompt.range(of: "Original task:")?.upperBound,
+           let end = prompt.range(of: "Current context:")?.lowerBound {
+            return String(prompt[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return prompt.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func actionForTask(_ task: String) -> StructuredAction? {
@@ -132,6 +211,21 @@ public actor InternalLocalModelProvider: LocalModelProvider {
                 expectedResult: "URL opens in the default browser",
                 riskLevel: .medium,
                 reason: "Internal planner recognized a simple open URL task."
+            )
+        }
+
+        // "open <app>" with no URL means launch/activate an app (e.g. "open chrome").
+        // URL opens are handled above; this catches the bare-app-name case.
+        if lowered.hasPrefix("open "), firstURL(in: trimmed) == nil {
+            let appName = String(trimmed.dropFirst("open ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !appName.isEmpty else { return nil }
+            return StructuredAction(
+                type: .switchApp,
+                targetKind: "app",
+                targetText: appName,
+                expectedResult: "Requested app is opened and becomes active",
+                riskLevel: .low,
+                reason: "Internal planner recognized a simple open-app task."
             )
         }
 
@@ -813,16 +907,27 @@ public actor APIModelProvider: LocalModelProvider {
     private func decodeChatResponse(_ data: Data) throws -> String {
         struct ChatResponse: Decodable {
             struct Choice: Decodable {
-                struct Message: Decodable { let content: String? }
+                struct Message: Decodable {
+                    let content: String?
+                    let reasoningContent: String?
+                    let reasoning: String?
+
+                    enum CodingKeys: String, CodingKey {
+                        case content
+                        case reasoningContent = "reasoning_content"
+                        case reasoning
+                    }
+                }
                 let message: Message?
             }
             let choices: [Choice]?
         }
         guard let decoded = try? JSONDecoder().decode(ChatResponse.self, from: data),
-              let content = decoded.choices?.first?.message?.content else {
+              let message = decoded.choices?.first?.message,
+              let content = message.content else {
             throw ModelProviderError.invalidResponse
         }
-        return content
+        return lpEmbedReasoning(content: content, reasoning: message.reasoningContent ?? message.reasoning)
     }
 }
 

@@ -237,6 +237,60 @@ public actor OpenAICompatibleModelProvider: LocalModelProvider {
         }
     }
 
+    public func completeStreaming(
+        prompt: String,
+        system: String?,
+        format: ModelResponseFormat?,
+        onDelta: @escaping @Sendable (StreamDelta) -> Void
+    ) async throws -> String {
+        activeTask?.cancel()
+
+        let task = Task<String, Error> {
+            try Task.checkCancellation()
+            var payload = try self.chatPayload(prompt: prompt, system: system, format: format)
+            payload["stream"] = true
+            let body = try JSONSerialization.data(withJSONObject: payload)
+            let bytes = try await lpOpenStreamingPOST(
+                url: try self.endpointURL(path: self.endpointConfiguration.chatCompletionsPath),
+                headers: self.headers(),
+                body: body,
+                timeoutSeconds: self.configuration.timeoutSeconds
+            )
+            // OpenAI-style SSE: `data: {chunk}` lines, terminated by `data: [DONE]`.
+            var content = ""
+            var reasoning = ""
+            for try await line in bytes.lines {
+                try Task.checkCancellation()
+                guard line.hasPrefix("data:") else { continue }
+                let payloadText = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                if payloadText == "[DONE]" { break }
+                guard let data = payloadText.data(using: .utf8),
+                      let chunk = try? JSONDecoder().decode(OpenAIStreamChunk.self, from: data),
+                      let delta = chunk.choices?.first?.delta else { continue }
+                let c = delta.content ?? ""
+                let r = delta.reasoningContent ?? delta.reasoning ?? ""
+                if !c.isEmpty { content += c }
+                if !r.isEmpty { reasoning += r }
+                if !c.isEmpty || !r.isEmpty {
+                    onDelta(StreamDelta(content: c, reasoning: r))
+                }
+            }
+            return lpEmbedReasoning(content: content, reasoning: reasoning.isEmpty ? nil : reasoning)
+        }
+        activeTask = task
+        defer {
+            if activeTask == task {
+                activeTask = nil
+            }
+        }
+
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
     public func healthCheck() async throws {
         let url = try endpointURL(path: endpointConfiguration.modelsPath)
         let response = try await httpClient.data(for: HTTPRequest(
@@ -256,6 +310,20 @@ public actor OpenAICompatibleModelProvider: LocalModelProvider {
     }
 
     public func closeModel() async throws {}
+
+    public func warmupAndRelease() async throws {
+        // Load the model with a 1-token generation (so the test doesn't burn a
+        // full response) and a short TTL so LM Studio auto-evicts the
+        // JIT-loaded model right after. The OpenAI-compatible endpoint exposes
+        // no explicit unload, so TTL is the supported eviction path.
+        // ponytail: TTL only evicts models JIT-loaded via the API; a model
+        // loaded by hand in LM Studio's UI won't auto-unload, and that's fine
+        // for a connection test.
+        var payload = try chatPayload(prompt: "ping", system: nil, format: nil)
+        payload["max_tokens"] = 1
+        payload["ttl"] = 1
+        _ = try await postChatCompletion(payload: payload)
+    }
 
     private func chatPayload(prompt: String, system: String?, format: ModelResponseFormat?) throws -> [String: Any] {
         var messages: [[String: String]] = []
@@ -315,6 +383,14 @@ public actor OpenAICompatibleModelProvider: LocalModelProvider {
             struct Choice: Decodable {
                 struct Message: Decodable {
                     let content: String?
+                    let reasoningContent: String?
+                    let reasoning: String?
+
+                    enum CodingKeys: String, CodingKey {
+                        case content
+                        case reasoningContent = "reasoning_content"
+                        case reasoning
+                    }
                 }
 
                 let message: Message?
@@ -330,8 +406,8 @@ public actor OpenAICompatibleModelProvider: LocalModelProvider {
         guard let decoded = try? JSONDecoder().decode(Response.self, from: data) else {
             throw ModelProviderError.invalidResponse
         }
-        if let content = decoded.choices?.compactMap({ $0.message?.content ?? $0.text }).first {
-            return content
+        if let choice = decoded.choices?.first, let content = choice.message?.content ?? choice.text {
+            return lpEmbedReasoning(content: content, reasoning: choice.message?.reasoningContent ?? choice.message?.reasoning)
         }
         if let response = decoded.response ?? decoded.text ?? decoded.content {
             return response
@@ -353,6 +429,25 @@ public actor OpenAICompatibleModelProvider: LocalModelProvider {
             return nil
         }
         return object
+    }
+
+    /// One SSE chunk from a streamed OpenAI-compatible chat completion.
+    private struct OpenAIStreamChunk: Decodable {
+        struct Choice: Decodable {
+            struct Delta: Decodable {
+                let content: String?
+                let reasoningContent: String?
+                let reasoning: String?
+
+                enum CodingKeys: String, CodingKey {
+                    case content
+                    case reasoningContent = "reasoning_content"
+                    case reasoning
+                }
+            }
+            let delta: Delta?
+        }
+        let choices: [Choice]?
     }
 }
 
@@ -399,6 +494,59 @@ public actor OllamaNativeModelProvider: LocalModelProvider {
         }
     }
 
+    public func completeStreaming(
+        prompt: String,
+        system: String?,
+        format: ModelResponseFormat?,
+        onDelta: @escaping @Sendable (StreamDelta) -> Void
+    ) async throws -> String {
+        activeTask?.cancel()
+
+        let task = Task<String, Error> {
+            try Task.checkCancellation()
+            var payload = try self.chatPayload(prompt: prompt, system: system, format: format)
+            payload["stream"] = true
+            let body = try JSONSerialization.data(withJSONObject: payload)
+            let bytes = try await lpOpenStreamingPOST(
+                url: try self.endpointURL(path: self.endpointConfiguration.chatPath),
+                headers: ["Content-Type": "application/json"],
+                body: body,
+                timeoutSeconds: self.configuration.timeoutSeconds
+            )
+            // Ollama streams NDJSON: one JSON object per line, `done:true` at the end.
+            var content = ""
+            var thinking = ""
+            for try await line in bytes.lines {
+                try Task.checkCancellation()
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty,
+                      let data = trimmed.data(using: .utf8),
+                      let chunk = try? JSONDecoder().decode(OllamaStreamChunk.self, from: data) else { continue }
+                let c = chunk.message?.content ?? ""
+                let t = chunk.message?.thinking ?? ""
+                if !c.isEmpty { content += c }
+                if !t.isEmpty { thinking += t }
+                if !c.isEmpty || !t.isEmpty {
+                    onDelta(StreamDelta(content: c, reasoning: t))
+                }
+                if chunk.done == true { break }
+            }
+            return lpEmbedReasoning(content: content, reasoning: thinking.isEmpty ? nil : thinking)
+        }
+        activeTask = task
+        defer {
+            if activeTask == task {
+                activeTask = nil
+            }
+        }
+
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
     public func healthCheck() async throws {
         let response = try await httpClient.data(for: HTTPRequest(
             url: try endpointURL(path: endpointConfiguration.tagsPath),
@@ -429,6 +577,16 @@ public actor OllamaNativeModelProvider: LocalModelProvider {
             body: body,
             timeoutSeconds: configuration.timeoutSeconds
         ))
+    }
+
+    public func warmupAndRelease() async throws {
+        // Generate a single token to load the model, then evict it immediately
+        // (keep_alive: 0) in the same request, so the test loads and unloads
+        // without burning a full generation.
+        var payload = try chatPayload(prompt: "ping", system: nil, format: nil)
+        payload["options"] = ["temperature": configuration.temperature, "num_predict": 1]
+        payload["keep_alive"] = 0
+        _ = try await postChat(payload: payload)
     }
 
     private func chatPayload(prompt: String, system: String?, format: ModelResponseFormat?) throws -> [String: Any] {
@@ -482,6 +640,7 @@ public actor OllamaNativeModelProvider: LocalModelProvider {
         struct Response: Decodable {
             struct Message: Decodable {
                 let content: String?
+                let thinking: String?
             }
 
             let message: Message?
@@ -493,7 +652,10 @@ public actor OllamaNativeModelProvider: LocalModelProvider {
         guard let decoded = try? JSONDecoder().decode(Response.self, from: data) else {
             throw ModelProviderError.invalidResponse
         }
-        if let content = decoded.message?.content ?? decoded.response ?? decoded.text ?? decoded.content {
+        if let content = decoded.message?.content {
+            return lpEmbedReasoning(content: content, reasoning: decoded.message?.thinking)
+        }
+        if let content = decoded.response ?? decoded.text ?? decoded.content {
             return content
         }
         throw ModelProviderError.invalidResponse
@@ -509,6 +671,16 @@ public actor OllamaNativeModelProvider: LocalModelProvider {
             return nil
         }
         return object
+    }
+
+    /// One NDJSON frame from Ollama's streamed `/api/chat`.
+    private struct OllamaStreamChunk: Decodable {
+        struct Message: Decodable {
+            let content: String?
+            let thinking: String?
+        }
+        let message: Message?
+        let done: Bool?
     }
 }
 

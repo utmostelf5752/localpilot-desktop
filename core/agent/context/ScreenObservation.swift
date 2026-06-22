@@ -141,14 +141,14 @@ public struct LiveScreenObserver: ScreenObserving {
     public func capture() async -> ScreenObservation {
         let activeApp = NSWorkspace.shared.frontmostApplication?.localizedName
         let activeWindow = Self.frontmostWindowTitle(for: activeApp)
-        let screenshot = Self.captureMainDisplayPNG()
+        let screenshot = Self.captureMainDisplayImage()
 
         return ScreenObservation(
             activeApp: activeApp,
             activeWindow: activeWindow,
             screenshotWidth: screenshot.width,
             screenshotHeight: screenshot.height,
-            screenshotPNGBase64: screenshot.pngBase64,
+            screenshotPNGBase64: screenshot.base64,
             accessibilitySummary: Self.accessibilitySummary(),
             elements: Self.collectActionableElements()
         )
@@ -166,7 +166,7 @@ public struct LiveScreenObserver: ScreenObserving {
         }?[kCGWindowName as String] as? String
     }
 
-    private static func captureMainDisplayPNG() -> (width: Int?, height: Int?, pngBase64: String?) {
+    private static func captureMainDisplayImage() -> (width: Int?, height: Int?, base64: String?) {
         guard let image = CGDisplayCreateImage(CGMainDisplayID()) else {
             return (nil, nil, nil)
         }
@@ -174,9 +174,14 @@ public struct LiveScreenObserver: ScreenObserving {
         let width = image.width
         let height = image.height
         let bitmap = NSBitmapImageRep(cgImage: image)
-        let data = bitmap.representation(using: .png, properties: [:])
+        // JPEG, not PNG: screenshots sent to a vision model are far smaller this
+        // way (~5-10x). 0.7 keeps UI text legible while cutting the payload.
+        let data = bitmap.representation(using: .jpeg, properties: [.compressionFactor: screenshotJPEGQuality])
         return (width, height, data?.base64EncodedString())
     }
+
+    // ponytail: raise toward 1.0 if the vision model misreads small on-screen text.
+    private static let screenshotJPEGQuality = 0.7
 
     private static func accessibilitySummary() -> String? {
         guard AXIsProcessTrusted() else {
@@ -400,6 +405,7 @@ public struct AgentContextBuilder: Sendable {
             allowedFolders: Set(settings.allowedFolders),
             visibleText: visibleText,
             activeFieldKind: nil,
+            observationSummary: observation.summary,
             latestScreenshotPNGBase64: observation.screenshotPNGBase64
         )
     }
